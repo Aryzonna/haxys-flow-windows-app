@@ -1,7 +1,7 @@
 {
   "name": "haxysflow",
   "productName": "Haxys Flow",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Haxys Flow - ERP para agências",
   "main": "src/main/main.js",
   "scripts": {
@@ -23,7 +23,7 @@
     },
     "nsis": {
       "oneClick": false,
-      "perMachine": false,
+      "perMachine": true,
       "allowToChangeInstallationDirectory": true,
       "deleteAppDataOnUninstall": false,
       "shortcutName": "Haxys Flow",
