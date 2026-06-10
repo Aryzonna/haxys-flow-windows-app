@@ -400,6 +400,7 @@ function injectShellCSS() {
       background: #0a0a0a !important;
       overflow: hidden !important;
       height: 100% !important;
+      font-family: "Segoe UI", system-ui, sans-serif !important;
     }
     html::before {
       content: '';
@@ -431,12 +432,13 @@ function injectTabBar() {
         'position: fixed',
         'top: 0',
         'left: 0',
+        'right: 0',
         'height: 38px',
         'display: flex',
         'align-items: center',
         'gap: 2px',
         'z-index: 2147483647',
-        'padding: 0 6px 0 10px',
+        'padding: 0 0 0 12px',
         'pointer-events: auto',
         'background: transparent',
         '-webkit-app-region: drag'
@@ -513,6 +515,7 @@ function injectTabBar() {
         'border: 1px solid rgba(0, 188, 212, 0.3)',
         'padding: 5px 14px',
         'border-radius: 8px',
+        'font-family: "Segoe UI", system-ui, sans-serif',
         'font-size: 11px',
         'font-weight: 600',
         'cursor: pointer',
