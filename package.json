@@ -1,7 +1,7 @@
 {
   "name": "haxysflow",
   "productName": "Haxys Flow",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Haxys Flow - ERP para agências",
   "main": "src/main/main.js",
   "scripts": {

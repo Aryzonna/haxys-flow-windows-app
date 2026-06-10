@@ -212,8 +212,10 @@ function createMainWindow() {
     icon: path.join(__dirname, '../../assets/icon.png'),
 
     webPreferences: {
-      contextIsolation: true,
+      preload: path.join(__dirname, '../preload/preload.js'),
       nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: false,
     },
   });
 
