@@ -59,6 +59,11 @@ try {
   _iconBase64 = `data:image/png;base64,${iconBuffer.toString('base64')}`;
 } catch (e) {}
 
+// ── App-Level Chrome Masking ────────────────────────────────────────
+// These MUST run before app.whenReady() and before any window/session is created.
+app.userAgentFallback = DESKTOP_UA;
+app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
+
 // ── Single Instance Lock ─────────────────────────────────────────────
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
