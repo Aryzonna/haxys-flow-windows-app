@@ -1,9 +1,10 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-// ── Expose Haxys Core API to renderer ──────────────────────────────
-contextBridge.exposeInMainWorld('haxyscore', {
+// ── Expose Haxys Flow API to renderer ──────────────────────────────
+contextBridge.exposeInMainWorld('haxys', {
   minimize: () => ipcRenderer.send('window:minimize'),
   close: () => ipcRenderer.send('window:close'),
+  switchTab: (viewName) => ipcRenderer.send('tab:switch', viewName),
 });
 
 // ── Inject custom CSS on page load ─────────────────────────────────

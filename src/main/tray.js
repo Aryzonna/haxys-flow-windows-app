@@ -7,9 +7,10 @@ let tray = null;
 /**
  * Creates the system tray icon with context menu.
  * @param {BrowserWindow} mainWindow - The main application window
+ * @param {WidgetManager} widgetManager - The widget manager
  * @returns {Tray} The created tray instance
  */
-function createTray(mainWindow) {
+function createTray(mainWindow, widgetManager) {
   // Load tray icon with fallback
   const iconPath = path.join(__dirname, '../../assets/tray-icon.png');
   let trayIcon;
@@ -23,7 +24,7 @@ function createTray(mainWindow) {
   }
 
   tray = new Tray(trayIcon);
-  tray.setToolTip('Haxys Core');
+  tray.setToolTip('Haxys Flow');
 
   // Build context menu
   const buildMenu = () => {
@@ -31,10 +32,18 @@ function createTray(mainWindow) {
 
     return Menu.buildFromTemplate([
       {
-        label: 'Abrir Haxys Core',
+        label: 'Abrir Haxys Flow',
         click: () => {
           mainWindow.show();
           mainWindow.focus();
+        },
+      },
+      {
+        label: 'Widget Flutuante (Ctrl+Shift+G)',
+        click: () => {
+          if (widgetManager) {
+            widgetManager.toggle();
+          }
         },
       },
       {

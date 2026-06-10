@@ -3,42 +3,61 @@
 // Electron wrapper for flow2.haxys.com.br
 // ═══════════════════════════════════════════════════════════════════════
 
-const { app, BrowserWindow, ipcMain, session, shell } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, session, shell } = require('electron');
 const path = require('path');
 const https = require('https');
 const { createTray } = require('./tray');
 const { initAutoUpdater } = require('./updater');
+const { WidgetManager } = require('./widget');
+const { registerShortcuts, unregisterShortcuts } = require('./shortcuts');
 const {
   getMainBounds,
   setMainBounds,
   getStartWithWindows,
   setStartWithWindows,
+  getLastWidgetOpen,
+  setLastWidgetOpen,
 } = require('./store');
 
 // ── Constants ────────────────────────────────────────────────────────
 const HAXYS_URL = 'https://flow2.haxys.com.br/';
+const GEMINI_URL = 'https://gemini.google.com';
+const GOOGLE_FLOW_URL = 'https://labs.google/fx/pt/tools/flow';
 const SESSION_PARTITION = 'persist:haxysflow';
 
 // Desktop Chrome User-Agent
-const DESKTOP_UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-  '(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
+// Dynamically build User-Agent to match the exact Chromium version
+const CHROME_VERSION = process.versions.chrome;
+const CHROME_MAJOR = CHROME_VERSION.split('.')[0];
+const DESKTOP_UA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROME_VERSION} Safari/537.36`;
+const MOBILE_UA = `Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROME_VERSION} Mobile Safari/537.36`;
 
-// Mobile Chrome UA for login popup (Google blocks Electron UA)
-const MOBILE_UA =
-  'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 ' +
-  '(KHTML, like Gecko) Chrome/134.0.6998.205 Mobile Safari/537.36';
+const SEC_CH_UA = `"Google Chrome";v="${CHROME_MAJOR}", "Chromium";v="${CHROME_MAJOR}", "Not?A_Brand";v="99"`;
+const SEC_CH_UA_FULL = `"Google Chrome";v="${CHROME_VERSION}", "Chromium";v="${CHROME_VERSION}", "Not?A_Brand";v="99.0.0.0"`;
 
 // ── State ────────────────────────────────────────────────────────────
 let mainWindow = null;
 let loginWindow = null;
 let tray = null;
+let widgetManager = null;
 let isQuitting = false;
 const startHidden = process.argv.some(arg => arg.includes('--hidden'));
 let mainBoundsTimeout = null;
 
+let flowView = null;
+let geminiView = null;
+let googleFlowView = null;
+let activeView = 'haxys'; // 'haxys', 'gemini', 'googleflow'
+
 let knownVersionTimestamp = null;
 let updatePollingInterval = null;
+
+let _iconBase64 = '';
+try {
+  const fs = require('fs');
+  const iconBuffer = fs.readFileSync(path.join(__dirname, '../../assets/icon.png'));
+  _iconBase64 = `data:image/png;base64,${iconBuffer.toString('base64')}`;
+} catch (e) {}
 
 // ── Single Instance Lock ─────────────────────────────────────────────
 const gotLock = app.requestSingleInstanceLock();
@@ -65,6 +84,13 @@ if (!gotLock) {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  if (widgetManager) {
+    setLastWidgetOpen(widgetManager.isOpen());
+  }
+});
+
+app.on('will-quit', () => {
+  unregisterShortcuts();
 });
 
 app.on('window-all-closed', () => {
@@ -77,8 +103,14 @@ app.whenReady().then(() => {
   configureSession();
   createMainWindow();
 
-  tray = createTray(mainWindow);
+  widgetManager = new WidgetManager();
+  tray = createTray(mainWindow, widgetManager);
+  registerShortcuts(widgetManager);
   initAutoUpdater(mainWindow);
+
+  if (getLastWidgetOpen()) {
+    widgetManager.show();
+  }
 
   setupIPC();
 });
@@ -87,20 +119,35 @@ app.whenReady().then(() => {
 
 function configureSession() {
   const ses = session.fromPartition(SESSION_PARTITION);
-
   ses.setUserAgent(DESKTOP_UA);
-
-  // Enable persistent cookies
   ses.cookies.flushStore().catch(() => {});
 
-  // Set permissive cookie policy
-  ses.webRequest.onBeforeSendHeaders((details, callback) => {
-    details.requestHeaders['User-Agent'] = DESKTOP_UA;
-    callback({ requestHeaders: details.requestHeaders });
-  });
+  ses.webRequest.onBeforeSendHeaders(
+    {
+      urls: [
+        '*://*.google.com/*',
+        '*://*.googleapis.com/*',
+        '*://*.gstatic.com/*',
+        '*://*.youtube.com/*',
+      ],
+    },
+    (details, callback) => {
+      const headers = details.requestHeaders;
+      const isLoginReq = loginWindow && !loginWindow.isDestroyed() &&
+        details.webContentsId === loginWindow.webContents.id;
 
-  const chromeVersion = DESKTOP_UA.match(/Chrome\/([\d.]+)/)?.[1] || '134.0.0.0';
-  console.log(`[HaxysFlow] Session configured — Chrome/${chromeVersion}`);
+      headers['User-Agent'] = isLoginReq ? MOBILE_UA : DESKTOP_UA;
+      headers['sec-ch-ua'] = SEC_CH_UA;
+      headers['sec-ch-ua-mobile'] = isLoginReq ? '?1' : '?0';
+      headers['sec-ch-ua-platform'] = isLoginReq ? '"Android"' : '"Windows"';
+      headers['sec-ch-ua-full-version-list'] = SEC_CH_UA_FULL;
+
+      delete headers['X-Electron-Version'];
+      callback({ requestHeaders: headers });
+    }
+  );
+
+  console.log(`[HaxysFlow] Session configured — Chrome/${CHROME_VERSION}`);
 }
 
 // ── URL Helpers ──────────────────────────────────────────────────────
@@ -111,10 +158,22 @@ function isAllowedURL(url) {
     return (
       parsed.hostname === 'flow2.haxys.com.br' ||
       parsed.hostname.endsWith('.haxys.com.br') ||
+      parsed.hostname === 'gemini.google.com' ||
+      parsed.hostname === 'labs.google' ||
       parsed.hostname === 'accounts.google.com' ||
+      parsed.hostname === 'myaccount.google.com' ||
       parsed.hostname === 'accounts.youtube.com' ||
       parsed.hostname === 'ssl.gstatic.com' ||
-      parsed.hostname === 'apis.google.com'
+      parsed.hostname === 'apis.google.com' ||
+      parsed.hostname === 'play.google.com' ||
+      parsed.hostname === 'www.google.com' ||
+      parsed.hostname === 'google.com' ||
+      parsed.hostname === 'oauthaccountmanager.googleapis.com' ||
+      parsed.hostname === 'content-push-notifications.googleapis.com' ||
+      parsed.hostname === 'gds.google.com' ||
+      parsed.hostname === 'lh3.googleusercontent.com' ||
+      parsed.hostname === 'aisandbox-pa.googleapis.com' ||
+      parsed.hostname === 'generativelanguage.googleapis.com'
     );
   } catch {
     return false;
@@ -131,7 +190,6 @@ function isLoginURL(url) {
 }
 
 // ── State for WebContentsView ────────────────────────────────────────
-let contentView = null;
 
 function createMainWindow() {
   const savedBounds = getMainBounds();
@@ -159,44 +217,47 @@ function createMainWindow() {
     },
   });
 
-  // Load a minimal shell page with the titlebar
-  mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(getShellHTML())}`);
+  mainWindow.loadURL('about:blank');
 
-  // Create the WebContentsView for the actual website
-  const { WebContentsView } = require('electron');
-  contentView = new WebContentsView({
-    webPreferences: {
-      preload: path.join(__dirname, '../preload/preload.js'),
-      partition: SESSION_PARTITION,
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-    },
-  });
-
-  mainWindow.contentView.addChildView(contentView);
-  contentView.webContents.loadURL(HAXYS_URL);
-
-  // Position the content view below the 38px titlebar
-  const layoutViews = () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    const { width, height } = mainWindow.getContentBounds();
-    contentView.setBounds({ x: 0, y: 38, width, height: height - 38 });
+  const viewPrefs = {
+    preload: path.join(__dirname, '../preload/preload.js'),
+    partition: SESSION_PARTITION,
+    contextIsolation: true,
+    nodeIntegration: false,
+    sandbox: false,
+    additionalArguments: ['--in-view'],
   };
 
-  layoutViews();
-  mainWindow.on('resize', layoutViews);
+  flowView = new WebContentsView({ webPreferences: viewPrefs });
+  geminiView = new WebContentsView({ webPreferences: viewPrefs });
+  googleFlowView = new WebContentsView({ webPreferences: viewPrefs });
 
-  // Show when content is ready
-  contentView.webContents.once('did-finish-load', () => {
-    if (!startHidden) {
-      mainWindow.show();
-    }
+  mainWindow.contentView.addChildView(flowView);
+  mainWindow.contentView.addChildView(geminiView);
+  mainWindow.contentView.addChildView(googleFlowView);
+
+  flowView.webContents.setUserAgent(DESKTOP_UA);
+  geminiView.webContents.setUserAgent(DESKTOP_UA);
+  googleFlowView.webContents.setUserAgent(DESKTOP_UA);
+
+  flowView.webContents.loadURL(HAXYS_URL);
+  geminiView.webContents.loadURL(GEMINI_URL);
+  googleFlowView.webContents.loadURL(GOOGLE_FLOW_URL);
+
+  geminiView.setVisible(false);
+  googleFlowView.setVisible(false);
+  activeView = 'haxys';
+
+  updateViewBounds();
+  mainWindow.on('resize', updateViewBounds);
+
+  flowView.webContents.once('did-finish-load', () => {
+    if (!startHidden) mainWindow.show();
   });
 
-  // Also inject CSS for shell titlebar
   mainWindow.webContents.once('did-finish-load', () => {
     injectShellCSS();
+    injectTabBar();
   });
 
   // ── Save window bounds (debounced) ─────────────────────────────
@@ -220,51 +281,16 @@ function createMainWindow() {
     }
   });
 
-  // ── Navigation Guards (on content view) ────────────────────────
-  contentView.webContents.on('will-navigate', (event, url) => {
-    if (isLoginURL(url)) {
-      event.preventDefault();
-      openLoginPopup(url);
-      return;
-    }
-    if (!isAllowedURL(url)) {
-      event.preventDefault();
-      shell.openExternal(url);
-    }
-  });
-
-  contentView.webContents.setWindowOpenHandler(({ url }) => {
-    if (isLoginURL(url)) {
-      openLoginPopup(url);
-      return { action: 'deny' };
-    }
-    if (isAllowedURL(url)) {
-      contentView.webContents.loadURL(url);
-      return { action: 'deny' };
-    }
-    shell.openExternal(url);
-    return { action: 'deny' };
-  });
-
-  // ── Keyboard Shortcuts (F5, Ctrl+R, Ctrl+Shift+R) ──────────────
-  contentView.webContents.on('before-input-event', (event, input) => {
-    if (input.type === 'keyDown') {
-      if (input.key === 'F5' || (input.control && input.key.toLowerCase() === 'r')) {
-        if (input.shift) {
-          contentView.webContents.reloadIgnoringCache();
-        } else {
-          contentView.webContents.reload();
-        }
-        event.preventDefault();
-      }
-    }
-  });
+  // ── Navigation Guards ──────────────────────────────────────
+  setupViewNavGuard(flowView);
+  setupViewNavGuard(geminiView);
+  setupViewNavGuard(googleFlowView);
 
   // Expose reload to tray
   app.reloadContentView = () => {
-    if (contentView && !contentView.webContents.isDestroyed()) {
-      contentView.webContents.reloadIgnoringCache();
-    }
+    if (activeView === 'haxys' && flowView) flowView.webContents.reloadIgnoringCache();
+    if (activeView === 'gemini' && geminiView) geminiView.webContents.reloadIgnoringCache();
+    if (activeView === 'googleflow' && googleFlowView) googleFlowView.webContents.reloadIgnoringCache();
   };
 
   // ── Navigation intercept for Update Button ──────────────
@@ -276,94 +302,87 @@ function createMainWindow() {
     return { action: 'deny' };
   });
 
-  // ── Version Polling ──────────────────────────────────────
-  // Removed: CRM now natively handles update banners internally.
+  // ── View CSS ──────────────────────────────────────────────────
+  const viewCSS = `
+    ::-webkit-scrollbar { width: 6px !important; }
+    ::-webkit-scrollbar-track { background: transparent !important; }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.15) !important;
+      border-radius: 3px !important;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(255, 255, 255, 0.25) !important;
+    }
+    * { scroll-behavior: smooth !important; }
+    [data-install-prompt],
+    [aria-label*="install"],
+    [aria-label*="download app"] {
+      display: none !important;
+    }
+  `;
+  const insertViewCSS = (view) => view.webContents.on('did-finish-load', () => view.webContents.insertCSS(viewCSS).catch(() => {}));
+  insertViewCSS(flowView);
+  insertViewCSS(geminiView);
+  insertViewCSS(googleFlowView);
 }
 
-// ── Shell HTML (titlebar with icon + name) ───────────────────────────
-
-function getShellHTML() {
-  const fs = require('fs');
-  const iconFile = path.join(__dirname, '../../assets/icon.png');
-  let iconDataURI = '';
-  try {
-    const iconData = fs.readFileSync(iconFile);
-    iconDataURI = `data:image/png;base64,${iconData.toString('base64')}`;
-  } catch {}
-
-
-  return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body {
-      height: 100%;
-      background: #0a0a0a;
-      overflow: hidden;
-      font-family: "Segoe UI", system-ui, sans-serif;
-    }
-    .titlebar {
-      display: flex;
-      align-items: center;
-      height: 38px;
-      padding: 0 150px 0 12px;
-      -webkit-app-region: drag;
-      user-select: none;
-    }
-    .titlebar img {
-      width: 20px;
-      height: 20px;
-      margin-right: 8px;
-      border-radius: 3px;
-      -webkit-app-region: drag;
-      pointer-events: none;
-    }
-    .titlebar span {
-      font-size: 13px;
-      font-weight: 500;
-      color: rgba(255, 255, 255, 0.85);
-      letter-spacing: 0.2px;
-    }
-    .spacer {
-      flex: 1;
-      -webkit-app-region: drag;
-    }
-    .action-btn {
-      display: none;
-      background: rgba(0, 188, 212, 0.05);
-      color: #00bcd4;
-      border: 1px solid rgba(0, 188, 212, 0.3);
-      padding: 5px 14px;
-      border-radius: 8px;
-      font-size: 11px;
-      font-weight: 600;
-      cursor: pointer;
-      -webkit-app-region: no-drag;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      transition: all 0.2s ease;
-      margin-left: 8px;
-    }
-    .action-btn:hover {
-      background: rgba(0, 188, 212, 0.15);
-      border-color: #00bcd4;
-    }
-  </style>
-</head>
-<body>
-  <div class="titlebar">
-    <img src="${iconDataURI}" alt="Haxys">
-    <span>Haxys Flow</span>
-    <div class="spacer"></div>
-    <div id="app-update-btn" class="action-btn" onclick="window.open('appaction://install-update/')">Atualizar o App</div>
-  </div>
-</body>
-</html>`;
+function updateViewBounds() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const { width, height } = mainWindow.getContentBounds();
+  const viewBounds = { x: 0, y: 38, width, height: height - 38 };
+  if (flowView) flowView.setBounds(viewBounds);
+  if (geminiView) geminiView.setBounds(viewBounds);
+  if (googleFlowView) googleFlowView.setBounds(viewBounds);
 }
 
-// ── Shell CSS Injection ──────────────────────────────────────────────
+function switchToView(name) {
+  if (name === activeView) return;
+  activeView = name;
+  if (flowView) flowView.setVisible(name === 'haxys');
+  if (geminiView) geminiView.setVisible(name === 'gemini');
+  if (googleFlowView) googleFlowView.setVisible(name === 'googleflow');
+  injectTabBar();
+}
+
+function setupViewNavGuard(view) {
+  view.webContents.on('will-navigate', (event, url) => {
+    if (isLoginURL(url)) {
+      event.preventDefault();
+      openLoginPopup(url);
+      return;
+    }
+    if (!isAllowedURL(url)) {
+      event.preventDefault();
+      shell.openExternal(url);
+    }
+  });
+
+  view.webContents.setWindowOpenHandler(({ url }) => {
+    if (isLoginURL(url)) {
+      openLoginPopup(url);
+      return { action: 'deny' };
+    }
+    if (isAllowedURL(url)) {
+      view.webContents.loadURL(url);
+      return { action: 'deny' };
+    }
+    shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
+  view.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown') {
+      if (input.key === 'F5' || (input.control && input.key.toLowerCase() === 'r')) {
+        if (input.shift) {
+          view.webContents.reloadIgnoringCache();
+        } else {
+          view.webContents.reload();
+        }
+        event.preventDefault();
+      }
+    }
+  });
+}
 
 function injectShellCSS() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -375,6 +394,134 @@ function injectShellCSS() {
       overflow: hidden !important;
       height: 100% !important;
     }
+    html::before {
+      content: '';
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 38px;
+      -webkit-app-region: drag;
+      z-index: 0;
+    }
+  `).catch(() => {});
+}
+
+function injectTabBar() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  const iconSrc = _iconBase64;
+  mainWindow.webContents.executeJavaScript(`
+    (function() {
+      var existing = document.getElementById('haxys-tabs');
+      if (existing) existing.remove();
+
+      var activeView = '${activeView}';
+
+      var bar = document.createElement('div');
+      bar.id = 'haxys-tabs';
+      bar.style.cssText = [
+        'position: fixed',
+        'top: 0',
+        'left: 0',
+        'height: 38px',
+        'display: flex',
+        'align-items: center',
+        'gap: 2px',
+        'z-index: 2147483647',
+        'padding: 0 6px 0 10px',
+        'pointer-events: auto',
+        'background: transparent',
+        '-webkit-app-region: drag'
+      ].join(' !important;') + ' !important';
+
+      var icon = document.createElement('img');
+      icon.src = '${iconSrc}';
+      icon.style.cssText = [
+        'width: 20px',
+        'height: 20px',
+        'object-fit: contain',
+        'display: block',
+        'flex-shrink: 0',
+        'margin-right: 6px',
+        'pointer-events: none',
+        '-webkit-app-region: drag'
+      ].join(' !important;') + ' !important';
+      bar.appendChild(icon);
+
+      function makeTab(label, viewName, active) {
+        var btn = document.createElement('button');
+        btn.textContent = label;
+        btn.style.cssText = [
+          'border: none',
+          'outline: none',
+          'background: ' + (active ? 'rgba(255,255,255,0.1)' : 'transparent'),
+          'color: rgba(232,234,237,' + (active ? '1' : '0.55') + ')',
+          'font-family: "Segoe UI", system-ui, sans-serif',
+          'font-size: 12.5px',
+          'font-weight: ' + (active ? '600' : '400'),
+          'padding: 5px 14px',
+          'border-radius: 8px',
+          'cursor: pointer',
+          'height: 28px',
+          'line-height: 18px',
+          'transition: all 0.15s ease',
+          'pointer-events: auto',
+          '-webkit-app-region: no-drag',
+          'letter-spacing: 0.1px'
+        ].join(' !important;') + ' !important';
+
+        btn.addEventListener('mouseenter', function() {
+          if (!active) this.style.setProperty('background', 'rgba(255,255,255,0.06)', 'important');
+          if (!active) this.style.setProperty('color', 'rgba(232,234,237,0.8)', 'important');
+        });
+        btn.addEventListener('mouseleave', function() {
+          if (!active) this.style.setProperty('background', 'transparent', 'important');
+          if (!active) this.style.setProperty('color', 'rgba(232,234,237,0.55)', 'important');
+        });
+        btn.addEventListener('click', function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          window.haxys.switchTab(viewName);
+        });
+        return btn;
+      }
+
+      bar.appendChild(makeTab('Haxys Flow', 'haxys', activeView === 'haxys'));
+      bar.appendChild(makeTab('Gemini', 'gemini', activeView === 'gemini'));
+      bar.appendChild(makeTab('Google Flow', 'googleflow', activeView === 'googleflow'));
+
+      var spacer = document.createElement('div');
+      spacer.style.flex = '1';
+      spacer.style.webkitAppRegion = 'drag';
+      bar.appendChild(spacer);
+
+      var updateBtn = document.createElement('div');
+      updateBtn.id = 'app-update-btn';
+      updateBtn.textContent = 'Atualizar o App';
+      updateBtn.style.cssText = [
+        'display: none',
+        'background: rgba(0, 188, 212, 0.05)',
+        'color: #00bcd4',
+        'border: 1px solid rgba(0, 188, 212, 0.3)',
+        'padding: 5px 14px',
+        'border-radius: 8px',
+        'font-size: 11px',
+        'font-weight: 600',
+        'cursor: pointer',
+        '-webkit-app-region: no-drag',
+        'text-transform: uppercase',
+        'letter-spacing: 0.5px',
+        'transition: all 0.2s ease',
+        'margin-right: 150px'
+      ].join(' !important;') + ' !important';
+      updateBtn.addEventListener('click', function() {
+        window.open('appaction://install-update/');
+      });
+      bar.appendChild(updateBtn);
+
+      document.documentElement.appendChild(bar);
+    })();
   `).catch(() => {});
 }
 
@@ -424,8 +571,9 @@ function openLoginPopup(loginURL) {
       ) {
         if (event) event.preventDefault();
         if (loginWindow && !loginWindow.isDestroyed()) loginWindow.close();
-        // Reload content view to pick up authenticated session
-        contentView.webContents.loadURL(HAXYS_URL);
+        if (flowView) flowView.webContents.loadURL(HAXYS_URL);
+        if (geminiView) geminiView.webContents.loadURL(GEMINI_URL);
+        if (googleFlowView) googleFlowView.webContents.loadURL(GOOGLE_FLOW_URL);
       }
     } catch {}
   };
@@ -454,6 +602,14 @@ function setupIPC() {
   });
 
   ipcMain.on('window:close', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
+  });
+
+  ipcMain.on('widget:toggle', () => {
+    if (widgetManager) widgetManager.toggle();
+  });
+
+  ipcMain.on('tab:switch', (_event, viewName) => {
+    switchToView(viewName);
   });
 }
