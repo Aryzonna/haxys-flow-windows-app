@@ -4,12 +4,15 @@ const { contextBridge, ipcRenderer } = require('electron');
 // Google's login page checks navigator.userAgentData.brands in JavaScript.
 // With contextIsolation, we can't modify the page's navigator directly from
 // the preload. Instead, we inject a <script> into the DOM that runs in the
-// (function injectBrowserSpoof() {
+// page's main world BEFORE any page scripts execute.
+
+(function injectBrowserSpoof() {
   try {
     // Do not run on the shell window (about:blank)
     if (window.location && window.location.protocol === 'about:') return;
 
     // Build version strings from the REAL Chromium version bundled in this Electron.
+    // Preload runs in Node context so process.versions.chrome is available.
     const chromeVersion = (typeof process !== 'undefined' && process.versions && process.versions.chrome) ? process.versions.chrome : '134.0.6998.205';
     const chromeMajor = chromeVersion.split('.')[0];                      // e.g. "134"
 
@@ -22,6 +25,7 @@ const { contextBridge, ipcRenderer } = require('electron');
         var CMJ = "${chromeMajor}";
 
         // ── 1. navigator.userAgentData ─────────────────────────────────
+        // Google checks brands[] to detect Electron ('Electron' brand = blocked)
         try {
           var brands = Object.freeze([
             Object.freeze({ brand: 'Google Chrome', version: CMJ }),
@@ -53,6 +57,8 @@ const { contextBridge, ipcRenderer } = require('electron');
         } catch(e) {}
 
         // ── 2. window.chrome ───────────────────────────────────────────
+        // THE MOST CRITICAL CHECK: Google's accounts.google.com verifies
+        // window.chrome exists. In Electron it's undefined → instant block.
         try {
           if (!window.chrome) {
             Object.defineProperty(window, 'chrome', {
@@ -99,6 +105,7 @@ const { contextBridge, ipcRenderer } = require('electron');
         } catch(e) {}
 
         // ── 3. navigator.webdriver ────────────────────────────────────
+        // Automation flag — must be false for real browser detection
         try {
           Object.defineProperty(navigator, 'webdriver', {
             get: function() { return false; },
@@ -107,6 +114,8 @@ const { contextBridge, ipcRenderer } = require('electron');
         } catch(e) {}
 
         // ── 4. navigator.plugins ──────────────────────────────────────
+        // Empty plugins array = headless browser detection signal.
+        // Real Chrome has PDF viewer plugin at minimum.
         try {
           if (navigator.plugins.length === 0) {
             const pluginData = [
@@ -130,6 +139,7 @@ const { contextBridge, ipcRenderer } = require('electron');
             });
           }
         } catch(e) {}
+
       })();
     \`;
 
@@ -139,10 +149,11 @@ const { contextBridge, ipcRenderer } = require('electron');
       document.documentElement.prepend(script);
       script.remove();
     }
-  } catch (err) {
-    console.error('Failed to inject browser spoof:', err);
+  } catch(e) {
+    console.error('Failed to inject spoofCode', e);
   }
 })();
+
 // ── Expose Haxys Flow API to renderer ──────────────────────────────
 contextBridge.exposeInMainWorld('haxys', {
   minimize: () => ipcRenderer.send('window:minimize'),
@@ -153,7 +164,7 @@ contextBridge.exposeInMainWorld('haxys', {
 // ── Inject custom CSS on page load ─────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
   const style = document.createElement('style');
-  style.textContent = `
+  style.textContent = \`
     /* Thin dark scrollbars */
     ::-webkit-scrollbar {
       width: 8px;
@@ -174,6 +185,6 @@ window.addEventListener('DOMContentLoaded', () => {
     html {
       scroll-behavior: smooth;
     }
-  `;
+  \`;
   document.head.appendChild(style);
 });

@@ -446,9 +446,8 @@ function injectTabBar() {
         'gap: 2px',
         'z-index: 2147483647',
         'padding: 0 0 0 12px',
-        'pointer-events: auto',
-        'background: transparent',
-        '-webkit-app-region: drag'
+        'pointer-events: none',
+        'background: transparent'
       ].join(' !important;') + ' !important';
 
       var icon = document.createElement('img');
@@ -460,8 +459,7 @@ function injectTabBar() {
         'display: block',
         'flex-shrink: 0',
         'margin-right: 6px',
-        'pointer-events: none',
-        '-webkit-app-region: drag'
+        'pointer-events: none'
       ].join(' !important;') + ' !important';
       bar.appendChild(icon);
 
@@ -509,7 +507,6 @@ function injectTabBar() {
 
       var spacer = document.createElement('div');
       spacer.style.flex = '1';
-      spacer.style.webkitAppRegion = 'drag';
       bar.appendChild(spacer);
 
       var updateBtn = document.createElement('div');
