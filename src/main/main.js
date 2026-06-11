@@ -364,6 +364,13 @@ function setupViewNavGuard(view) {
     }
   });
 
+  view.webContents.on('will-redirect', (event, url) => {
+    if (isLoginURL(url)) {
+      event.preventDefault();
+      openLoginPopup(url);
+    }
+  });
+
   view.webContents.setWindowOpenHandler(({ url }) => {
     if (isLoginURL(url)) {
       openLoginPopup(url);
