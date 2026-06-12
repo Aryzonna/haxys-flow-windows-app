@@ -1,0 +1,1 @@
+window.haxys is missing in about:blank!

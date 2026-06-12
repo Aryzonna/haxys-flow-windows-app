@@ -141,7 +141,7 @@ const { contextBridge, ipcRenderer } = require('electron');
         } catch(e) {}
 
       })();
-    \`;
+    `;
 
     const script = document.createElement('script');
     script.textContent = spoofCode;
@@ -164,7 +164,7 @@ contextBridge.exposeInMainWorld('haxys', {
 // ── Inject custom CSS on page load ─────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
   const style = document.createElement('style');
-  style.textContent = \`
+  style.textContent = `
     /* Thin dark scrollbars */
     ::-webkit-scrollbar {
       width: 8px;
@@ -185,6 +185,6 @@ window.addEventListener('DOMContentLoaded', () => {
     html {
       scroll-behavior: smooth;
     }
-  \`;
+  `;
   document.head.appendChild(style);
 });
