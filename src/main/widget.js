@@ -113,6 +113,10 @@ class WidgetManager {
     this.window.on('move', saveBounds);
 
     this.window.on('close', (e) => {
+      const { app } = require('electron');
+      if (app.isQuitting) {
+        return; // allow the window to close
+      }
       if (this.window && !this.window.isDestroyed()) {
         e.preventDefault();
         this.window.hide();

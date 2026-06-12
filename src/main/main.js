@@ -89,6 +89,7 @@ if (!gotLock) {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  app.isQuitting = true;
   if (widgetManager) {
     setLastWidgetOpen(widgetManager.isOpen());
   }
@@ -523,6 +524,7 @@ function injectTabBar() {
         'font-size: 11px',
         'font-weight: 600',
         'cursor: pointer',
+        'pointer-events: auto',
         '-webkit-app-region: no-drag',
         'text-transform: uppercase',
         'letter-spacing: 0.5px',
