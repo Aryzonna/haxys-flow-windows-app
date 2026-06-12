@@ -138,6 +138,27 @@ const { contextBridge, ipcRenderer } = require('electron');
               configurable: true
             });
           }
+        // ── 5. Disable WebAuthn / Passkeys ─────────────────────────────
+        // We intercept navigator.credentials.get to prevent the native
+        // Windows Security passkey prompt from appearing during login.
+        try {
+          if (navigator.credentials) {
+            const originalGet = navigator.credentials.get;
+            navigator.credentials.get = function(options) {
+              if (options && options.publicKey) {
+                return Promise.reject(new DOMException('Passkeys are disabled in this environment', 'NotAllowedError'));
+              }
+              return originalGet.apply(this, arguments);
+            };
+            
+            const originalCreate = navigator.credentials.create;
+            navigator.credentials.create = function(options) {
+              if (options && options.publicKey) {
+                return Promise.reject(new DOMException('Passkeys are disabled in this environment', 'NotAllowedError'));
+              }
+              return originalCreate.apply(this, arguments);
+            };
+          }
         } catch(e) {}
 
       })();
