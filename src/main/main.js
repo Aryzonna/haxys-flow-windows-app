@@ -307,6 +307,10 @@ function createMainWindow() {
       require('electron-updater').autoUpdater.quitAndInstall(true, true);
       return { action: 'deny' };
     }
+    if (url === 'appaction://hard-reload/') {
+      if (app.reloadContentView) app.reloadContentView();
+      return { action: 'deny' };
+    }
     return { action: 'deny' };
   });
 
@@ -529,12 +533,45 @@ function injectTabBar() {
         'text-transform: uppercase',
         'letter-spacing: 0.5px',
         'transition: all 0.2s ease',
-        'margin-right: 150px'
+        'margin-right: 8px'
       ].join(' !important;') + ' !important';
       updateBtn.addEventListener('click', function() {
         window.open('appaction://install-update/');
       });
       bar.appendChild(updateBtn);
+
+      var refreshBtn = document.createElement('div');
+      refreshBtn.id = 'app-refresh-btn';
+      refreshBtn.title = 'Recarregar página (Ctrl+Shift+R)';
+      refreshBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"></path><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>';
+      refreshBtn.style.cssText = [
+        'display: flex',
+        'align-items: center',
+        'justify-content: center',
+        'width: 28px',
+        'height: 28px',
+        'color: rgba(255, 255, 255, 0.7)',
+        'background: transparent',
+        'border-radius: 6px',
+        'cursor: pointer',
+        'pointer-events: auto',
+        '-webkit-app-region: no-drag',
+        'transition: background 0.2s, color 0.2s',
+        'margin-right: 150px'
+      ].join(' !important;') + ' !important';
+
+      refreshBtn.addEventListener('mouseenter', function() {
+        this.style.setProperty('background', 'rgba(255, 255, 255, 0.1)', 'important');
+        this.style.setProperty('color', '#ffffff', 'important');
+      });
+      refreshBtn.addEventListener('mouseleave', function() {
+        this.style.setProperty('background', 'transparent', 'important');
+        this.style.setProperty('color', 'rgba(255, 255, 255, 0.7)', 'important');
+      });
+      refreshBtn.addEventListener('click', function() {
+        window.open('appaction://hard-reload/');
+      });
+      bar.appendChild(refreshBtn);
 
       document.documentElement.appendChild(bar);
     })();
