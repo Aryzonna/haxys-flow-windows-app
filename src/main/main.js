@@ -382,7 +382,7 @@ function setupViewNavGuard(view) {
   view.webContents.on('will-navigate', (event, url) => {
     if (isLoginURL(url)) {
       event.preventDefault();
-      openLoginPopup(url);
+      openLoginPopup(url, view);
       return;
     }
     if (!isAllowedURL(url)) {
@@ -394,13 +394,13 @@ function setupViewNavGuard(view) {
   view.webContents.on('will-redirect', (event, url) => {
     if (isLoginURL(url)) {
       event.preventDefault();
-      openLoginPopup(url);
+      openLoginPopup(url, view);
     }
   });
 
   view.webContents.setWindowOpenHandler(({ url }) => {
     if (isLoginURL(url)) {
-      openLoginPopup(url);
+      openLoginPopup(url, view);
       return { action: 'deny' };
     }
     if (isAllowedURL(url)) {
@@ -607,7 +607,7 @@ function injectTabBar() {
 // Workaround: open login in a popup with mobile Chrome UA.
 // Same session partition → cookies are shared.
 
-function openLoginPopup(loginURL) {
+function openLoginPopup(loginURL, triggeringView) {
   if (loginWindow && !loginWindow.isDestroyed()) {
     loginWindow.focus();
     return;
@@ -644,15 +644,17 @@ function openLoginPopup(loginURL) {
       if (
         parsed.hostname !== 'accounts.google.com' &&
         parsed.hostname !== 'ssl.gstatic.com' &&
-        parsed.hostname !== 'apis.google.com'
+        parsed.hostname !== 'apis.google.com' &&
+        parsed.hostname !== 'myaccount.google.com'
       ) {
         if (event) event.preventDefault();
         if (loginWindow && !loginWindow.isDestroyed()) loginWindow.close();
-        if (flowView) flowView.webContents.loadURL(HAXYS_URL);
-        if (hubView) hubView.webContents.loadURL(HUB_URL);
-        if (coreView) coreView.webContents.loadURL(CORE_URL);
-        if (geminiView) geminiView.webContents.loadURL(GEMINI_URL);
-        if (googleFlowView) googleFlowView.webContents.loadURL(GOOGLE_FLOW_URL);
+        
+        // Load the authenticated URL back into the view that requested it
+        // This preserves the session token/cookie set in the redirect URL
+        if (triggeringView) {
+          triggeringView.webContents.loadURL(url);
+        }
       }
     } catch {}
   };
