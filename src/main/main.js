@@ -21,6 +21,8 @@ const {
 
 // ── Constants ────────────────────────────────────────────────────────
 const HAXYS_URL = 'https://flow2.haxys.com.br/';
+const HUB_URL = 'https://hub.haxys.com.br';
+const CORE_URL = 'https://core.haxys.com.br';
 const GEMINI_URL = 'https://gemini.google.com';
 const GOOGLE_FLOW_URL = 'https://labs.google/fx/pt/tools/flow';
 const SESSION_PARTITION = 'persist:haxysflow';
@@ -45,9 +47,11 @@ const startHidden = process.argv.some(arg => arg.includes('--hidden'));
 let mainBoundsTimeout = null;
 
 let flowView = null;
+let hubView = null;
+let coreView = null;
 let geminiView = null;
 let googleFlowView = null;
-let activeView = 'haxys'; // 'haxys', 'gemini', 'googleflow'
+let activeView = 'haxys';
 
 let knownVersionTimestamp = null;
 let updatePollingInterval = null;
@@ -237,21 +241,31 @@ function createMainWindow() {
   };
 
   flowView = new WebContentsView({ webPreferences: viewPrefs });
+  hubView = new WebContentsView({ webPreferences: viewPrefs });
+  coreView = new WebContentsView({ webPreferences: viewPrefs });
   geminiView = new WebContentsView({ webPreferences: viewPrefs });
   googleFlowView = new WebContentsView({ webPreferences: viewPrefs });
 
   mainWindow.contentView.addChildView(flowView);
+  mainWindow.contentView.addChildView(hubView);
+  mainWindow.contentView.addChildView(coreView);
   mainWindow.contentView.addChildView(geminiView);
   mainWindow.contentView.addChildView(googleFlowView);
 
   flowView.webContents.setUserAgent(DESKTOP_UA);
+  hubView.webContents.setUserAgent(DESKTOP_UA);
+  coreView.webContents.setUserAgent(DESKTOP_UA);
   geminiView.webContents.setUserAgent(DESKTOP_UA);
   googleFlowView.webContents.setUserAgent(DESKTOP_UA);
 
   flowView.webContents.loadURL(HAXYS_URL);
+  hubView.webContents.loadURL(HUB_URL);
+  coreView.webContents.loadURL(CORE_URL);
   geminiView.webContents.loadURL(GEMINI_URL);
   googleFlowView.webContents.loadURL(GOOGLE_FLOW_URL);
 
+  hubView.setVisible(false);
+  coreView.setVisible(false);
   geminiView.setVisible(false);
   googleFlowView.setVisible(false);
   activeView = 'haxys';
@@ -291,6 +305,8 @@ function createMainWindow() {
 
   // ── Navigation Guards ──────────────────────────────────────
   setupViewNavGuard(flowView);
+  setupViewNavGuard(hubView);
+  setupViewNavGuard(coreView);
   setupViewNavGuard(geminiView);
   setupViewNavGuard(googleFlowView);
 
@@ -334,6 +350,8 @@ function createMainWindow() {
   `;
   const insertViewCSS = (view) => view.webContents.on('did-finish-load', () => view.webContents.insertCSS(viewCSS).catch(() => {}));
   insertViewCSS(flowView);
+  insertViewCSS(hubView);
+  insertViewCSS(coreView);
   insertViewCSS(geminiView);
   insertViewCSS(googleFlowView);
 }
@@ -343,6 +361,8 @@ function updateViewBounds() {
   const { width, height } = mainWindow.getContentBounds();
   const viewBounds = { x: 0, y: 38, width, height: height - 38 };
   if (flowView) flowView.setBounds(viewBounds);
+  if (hubView) hubView.setBounds(viewBounds);
+  if (coreView) coreView.setBounds(viewBounds);
   if (geminiView) geminiView.setBounds(viewBounds);
   if (googleFlowView) googleFlowView.setBounds(viewBounds);
 }
@@ -351,6 +371,8 @@ function switchToView(name) {
   if (name === activeView) return;
   activeView = name;
   if (flowView) flowView.setVisible(name === 'haxys');
+  if (hubView) hubView.setVisible(name === 'haxyshub');
+  if (coreView) coreView.setVisible(name === 'haxyscore');
   if (geminiView) geminiView.setVisible(name === 'gemini');
   if (googleFlowView) googleFlowView.setVisible(name === 'googleflow');
   injectTabBar();
@@ -507,6 +529,8 @@ function injectTabBar() {
       }
 
       bar.appendChild(makeTab('Haxys Flow', 'haxys', activeView === 'haxys'));
+      bar.appendChild(makeTab('Haxys Hub', 'haxyshub', activeView === 'haxyshub'));
+      bar.appendChild(makeTab('Haxys Core', 'haxyscore', activeView === 'haxyscore'));
       bar.appendChild(makeTab('Gemini', 'gemini', activeView === 'gemini'));
       bar.appendChild(makeTab('Google Flow', 'googleflow', activeView === 'googleflow'));
 
@@ -625,6 +649,8 @@ function openLoginPopup(loginURL) {
         if (event) event.preventDefault();
         if (loginWindow && !loginWindow.isDestroyed()) loginWindow.close();
         if (flowView) flowView.webContents.loadURL(HAXYS_URL);
+        if (hubView) hubView.webContents.loadURL(HUB_URL);
+        if (coreView) coreView.webContents.loadURL(CORE_URL);
         if (geminiView) geminiView.webContents.loadURL(GEMINI_URL);
         if (googleFlowView) googleFlowView.webContents.loadURL(GOOGLE_FLOW_URL);
       }
