@@ -182,6 +182,14 @@ contextBridge.exposeInMainWorld('haxys', {
   switchTab: (viewName) => ipcRenderer.send('tab:switch', viewName),
 });
 
+// ── Bridge p/ abrir links externos no navegador do sistema ─────────
+// O frontend (lib/openExternal) chama window.electronAPI.openExternal,
+// que abre via shell.openExternal no main — sem navegar/substituir a janela.
+// Importante no Flow, que allow-lista google.com para as abas Gemini/Flow.
+contextBridge.exposeInMainWorld('electronAPI', {
+  openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
+});
+
 // ── Inject custom CSS on page load ─────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
   const style = document.createElement('style');

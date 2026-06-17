@@ -693,4 +693,13 @@ function setupIPC() {
   ipcMain.on('tab:switch', (_event, viewName) => {
     switchToView(viewName);
   });
+
+  // Abre links externos no navegador do sistema (bridge electronAPI.openExternal)
+  ipcMain.handle('shell:openExternal', (_event, url) => {
+    try {
+      if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
+        shell.openExternal(url);
+      }
+    } catch (e) {}
+  });
 }
