@@ -3,7 +3,7 @@
 // Electron wrapper for flow2.haxys.com.br
 // ═══════════════════════════════════════════════════════════════════════
 
-const { app, BrowserWindow, WebContentsView, ipcMain, session, shell } = require('electron');
+const { app, BrowserWindow, WebContentsView, Menu, ipcMain, session, shell } = require('electron');
 const path = require('path');
 const https = require('https');
 const { createTray } = require('./tray');
@@ -110,6 +110,7 @@ app.on('window-all-closed', () => {
 // ── App Ready ────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
+  installAppMenu();
   configureSession();
   createMainWindow();
 
@@ -277,7 +278,10 @@ function createMainWindow() {
     if (!startHidden) mainWindow.show();
   });
 
-  mainWindow.webContents.once('did-finish-load', () => {
+  // 'on' e não 'once': se o shell recarregar por qualquer motivo (atalho que
+  // escapou, crash do renderer, reload programático), a title bar precisa ser
+  // reinjetada — senão as abas e a logo somem de vez.
+  mainWindow.webContents.on('did-finish-load', () => {
     injectShellCSS();
     injectTabBar();
   });
@@ -311,11 +315,7 @@ function createMainWindow() {
   setupViewNavGuard(googleFlowView);
 
   // Expose reload to tray
-  app.reloadContentView = () => {
-    if (activeView === 'haxys' && flowView) flowView.webContents.reloadIgnoringCache();
-    if (activeView === 'gemini' && geminiView) geminiView.webContents.reloadIgnoringCache();
-    if (activeView === 'googleflow' && googleFlowView) googleFlowView.webContents.reloadIgnoringCache();
-  };
+  app.reloadContentView = () => reloadActiveView(true);
 
   // ── Navigation intercept for Update Button ──────────────
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -376,6 +376,77 @@ function switchToView(name) {
   if (geminiView) geminiView.setVisible(name === 'gemini');
   if (googleFlowView) googleFlowView.setVisible(name === 'googleflow');
   injectTabBar();
+}
+
+// ── Reload ───────────────────────────────────────────────────────────
+// A janela principal é só um shell (about:blank) que hospeda a title bar;
+// o conteúdo real vive nas WebContentsView. Recarregar o shell apagaria a
+// tab bar, então todo pedido de reload é redirecionado para a view ativa.
+
+function getActiveView() {
+  const views = {
+    haxys: flowView,
+    haxyshub: hubView,
+    haxyscore: coreView,
+    gemini: geminiView,
+    googleflow: googleFlowView,
+  };
+  const view = views[activeView];
+  return view && !view.webContents.isDestroyed() ? view : null;
+}
+
+function reloadActiveView(ignoreCache) {
+  const view = getActiveView();
+  if (!view) return;
+  if (ignoreCache) {
+    view.webContents.reloadIgnoringCache();
+  } else {
+    view.webContents.reload();
+  }
+}
+
+function toggleActiveViewDevTools() {
+  const view = getActiveView();
+  if (view) view.webContents.toggleDevTools();
+}
+
+// O menu padrão do Electron liga Ctrl+R e Ctrl+Shift+R aos roles reload/
+// forceReload, que agem na JANELA focada — ou seja, no shell. Substituímos o
+// menu para que os atalhos recarreguem a view ativa, independente de onde o
+// foco esteja. Os roles de edição continuam presentes para não perder
+// copiar/colar. A barra de menu nunca aparece (titleBarStyle: 'hidden').
+function installAppMenu() {
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      {
+        label: 'Editar',
+        submenu: [
+          { role: 'undo', label: 'Desfazer' },
+          { role: 'redo', label: 'Refazer' },
+          { type: 'separator' },
+          { role: 'cut', label: 'Recortar' },
+          { role: 'copy', label: 'Copiar' },
+          { role: 'paste', label: 'Colar' },
+          { role: 'selectAll', label: 'Selecionar tudo' },
+        ],
+      },
+      {
+        label: 'Exibir',
+        submenu: [
+          { label: 'Recarregar', accelerator: 'CmdOrCtrl+R', click: () => reloadActiveView(false) },
+          { label: 'Recarregar', accelerator: 'F5', click: () => reloadActiveView(false) },
+          { label: 'Recarregar ignorando cache', accelerator: 'CmdOrCtrl+Shift+R', click: () => reloadActiveView(true) },
+          { label: 'Recarregar ignorando cache', accelerator: 'Shift+F5', click: () => reloadActiveView(true) },
+          { type: 'separator' },
+          // O role padrão abriria o DevTools do shell vazio; aqui vai na view ativa.
+          { label: 'Ferramentas do desenvolvedor', accelerator: 'CmdOrCtrl+Shift+I', click: () => toggleActiveViewDevTools() },
+          { label: 'Ferramentas do desenvolvedor', accelerator: 'F12', click: () => toggleActiveViewDevTools() },
+          { type: 'separator' },
+          { role: 'togglefullscreen', label: 'Tela cheia' },
+        ],
+      },
+    ])
+  );
 }
 
 function setupViewNavGuard(view) {
