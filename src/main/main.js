@@ -29,6 +29,7 @@ const {
   ehPedidoDoFlow,
 } = require('./settings');
 const { iniciarLog, caminhoDoLog, limparLog } = require('./log');
+const { EDICAO } = require('./edicao');
 
 // ── Constants ────────────────────────────────────────────────────────
 const SESSION_PARTITION = 'persist:haxysflow';
@@ -88,6 +89,7 @@ app.userAgentFallback = DESKTOP_UA;
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
 
 iniciarLog();
+console.log(`[HaxysFlow] edição ${EDICAO} — abas: ${ABAS.map((a) => a.nome).join(', ')}`);
 
 /**
  * ACELERAÇÃO POR HARDWARE — o único ajuste que precisa ser lido AQUI, antes do `whenReady`.
@@ -960,6 +962,7 @@ function aplicarAjustes(chave, ajustes) {
 function setupAjustesIPC() {
   apenasDoFlow('app:versao', () => ({
     versao: app.getVersion(),
+    edicao: EDICAO,
     electron: process.versions.electron,
     chrome: process.versions.chrome,
   }));

@@ -1,6 +1,7 @@
 const { Tray, Menu, nativeImage, app } = require('electron');
 const path = require('path');
 const { lerAjustes, gravarAjuste, sincronizarInicioComWindows } = require('./settings');
+const { EH_INTERNA } = require('./edicao');
 
 let tray = null;
 
@@ -30,7 +31,9 @@ function createTray(mainWindow, widgetManager, acoes = {}) {
   }
 
   tray = new Tray(trayIcon);
-  tray.setToolTip('Haxys Flow');
+  // O rótulo distingue as duas edições no ícone da bandeja — é o jeito mais rápido de saber
+  // qual delas está instalada antes de investigar "sumiu a aba do Hub".
+  tray.setToolTip(EH_INTERNA ? 'Haxys Flow (interna)' : 'Haxys Flow');
 
   // Build context menu
   const buildMenu = () => {

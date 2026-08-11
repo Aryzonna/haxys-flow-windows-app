@@ -7,13 +7,27 @@
  * atualizar", e a única saída era reinstalar por cima.
  */
 
+const { EH_INTERNA } = require('./edicao');
+
 let autoUpdater = null;
 let versaoBaixada = null;
 let janela = null;
 
+/**
+ * CADA EDIÇÃO TEM O SEU CANAL, e sem isso as duas se atropelam.
+ *
+ * As duas são publicadas na MESMA release do GitHub, cada uma com o seu arquivo de
+ * atualização (`latest.yml` para a pública, `interna.yml` para a interna). Se a interna
+ * lesse o `latest.yml`, o atualizador instalaria a pública por cima na primeira madrugada e
+ * as abas do Hub e do Core desapareceriam sozinhas — parecendo bug, não configuração.
+ *
+ * O canal também é gravado no `app-update.yml` durante o build; repetir aqui é de propósito,
+ * para que um pacote gerado sem a marcação não escorregue para o canal errado.
+ */
 function carregar() {
   if (autoUpdater) return autoUpdater;
   autoUpdater = require('electron-updater').autoUpdater;
+  if (EH_INTERNA) autoUpdater.channel = 'interna';
   return autoUpdater;
 }
 
