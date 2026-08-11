@@ -31,6 +31,16 @@ Module._load = function (request, ...resto) {
 const base = process.argv[2] || __dirname;
 const s = require(path.join(base, 'src/main/settings.js'));
 
+/*
+  Fora do Electron o electron-store IGNORA o `userData` do app falso e resolve um caminho
+  próprio, estável por usuário — então o run seguinte leria o que este deixou e as
+  asserções de PADRÃO falhariam sozinhas (foi o que aconteceu). O estado é zerado antes e
+  depois: começa como instalação nova, e não deixa rastro em quem rodou.
+*/
+const { store } = require(path.join(base, 'src/main/store.js'));
+store.clear();
+console.log(`(store de teste: ${store.path})`);
+
 let falhas = 0;
 function ok(nome, condicao, extra) {
   if (condicao) {
@@ -107,5 +117,6 @@ ok('sem quadro cai no sender', s.ehPedidoDoFlow({ senderFrame: null, sender: { g
 ok('url quebrada não passa', s.ehPedidoDoFlow({ senderFrame: null, sender: { getURL: () => 'nada' } }) === false);
 
 console.log(`\n${falhas === 0 ? 'TUDO OK' : `${falhas} FALHA(S)`}\n`);
+store.clear();
 fs.rmSync(userData, { recursive: true, force: true });
 process.exit(falhas === 0 ? 0 : 1);
