@@ -1,16 +1,22 @@
 const { Tray, Menu, nativeImage, app } = require('electron');
 const path = require('path');
-const { getStartWithWindows, setStartWithWindows } = require('./store');
+const { lerAjustes, gravarAjuste, sincronizarInicioComWindows } = require('./settings');
 
 let tray = null;
 
 /**
  * Creates the system tray icon with context menu.
+ *
+ * O menu e a tela de ajustes do Flow leem e gravam pelo MESMO módulo (settings.js). Antes
+ * este arquivo chamava `setLoginItemSettings` por conta própria; com dois lugares mexendo no
+ * mesmo interruptor, o menu mostraria "desmarcado" para algo que a tela acabou de ligar.
+ *
  * @param {BrowserWindow} mainWindow - The main application window
  * @param {WidgetManager} widgetManager - The widget manager
- * @returns {Tray} The created tray instance
+ * @param {{ abrirAjustes?: () => void }} acoes - o que só o main.js sabe fazer
+ * @returns {Tray} The created tray instance, com `atualizarMenu()` pendurado
  */
-function createTray(mainWindow, widgetManager) {
+function createTray(mainWindow, widgetManager, acoes = {}) {
   // Load tray icon with fallback
   const iconPath = path.join(__dirname, '../../assets/tray-icon.png');
   let trayIcon;
@@ -28,7 +34,7 @@ function createTray(mainWindow, widgetManager) {
 
   // Build context menu
   const buildMenu = () => {
-    const startsWithWindows = getStartWithWindows();
+    const ajustes = lerAjustes();
 
     return Menu.buildFromTemplate([
       {
@@ -39,7 +45,7 @@ function createTray(mainWindow, widgetManager) {
         },
       },
       {
-        label: 'Widget Flutuante (Ctrl+Shift+G)',
+        label: 'Widget Flutuante' + (ajustes.widgetShortcut ? ` (${ajustes.widgetShortcut})` : ''),
         click: () => {
           if (widgetManager) {
             widgetManager.toggle();
@@ -56,15 +62,16 @@ function createTray(mainWindow, widgetManager) {
       {
         label: 'Iniciar com Windows',
         type: 'checkbox',
-        checked: startsWithWindows,
+        checked: ajustes.startWithWindows,
         click: (menuItem) => {
-          const enabled = menuItem.checked;
-          setStartWithWindows(enabled);
-          app.setLoginItemSettings({
-            openAtLogin: enabled,
-            path: process.execPath,
-            args: ['--hidden'],
-          });
+          const atualizados = gravarAjuste('startWithWindows', menuItem.checked);
+          sincronizarInicioComWindows(atualizados);
+        },
+      },
+      {
+        label: 'Ajustes do aplicativo…',
+        click: () => {
+          if (acoes.abrirAjustes) acoes.abrirAjustes();
         },
       },
       { type: 'separator' },
@@ -77,13 +84,21 @@ function createTray(mainWindow, widgetManager) {
     ]);
   };
 
-  tray.setContextMenu(buildMenu());
+  const atualizarMenu = () => {
+    if (tray && !tray.isDestroyed()) tray.setContextMenu(buildMenu());
+  };
+
+  atualizarMenu();
 
   // Double-click tray → show main window
   tray.on('double-click', () => {
     mainWindow.show();
     mainWindow.focus();
   });
+
+  // A tela de ajustes muda os mesmos valores; sem isto o menu continuaria mostrando o
+  // estado de quando o app subiu.
+  tray.atualizarMenu = atualizarMenu;
 
   return tray;
 }

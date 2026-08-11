@@ -176,11 +176,60 @@ const { contextBridge, ipcRenderer } = require('electron');
 })();
 
 // ── Expose Haxys Flow API to renderer ──────────────────────────────
-contextBridge.exposeInMainWorld('haxys', {
+
+/**
+ * A API DE AJUSTES SÓ EXISTE NA ORIGEM DO FLOW.
+ *
+ * Este preload roda nas CINCO abas e também no widget flutuante — ou seja, roda dentro do
+ * gemini.google.com e do labs.google, que são páginas de terceiro hospedadas na nossa
+ * janela. Expor ali "apagar sessão", "desligar abas" ou "trocar o atalho global" seria
+ * entregar o app a um script que não é nosso.
+ *
+ * `window.location` aqui é a URL que a view está carregando, e o preload roda antes de
+ * qualquer script da página. O processo principal confere a origem de novo em cada handler
+ * (settings.js → `ehPedidoDoFlow`): esta cerca é a primeira, não a única.
+ */
+const ORIGEM_DO_FLOW = 'https://flow2.haxys.com.br';
+const ehOFlow = (() => {
+  try {
+    return window.location.origin === ORIGEM_DO_FLOW;
+  } catch {
+    return false;
+  }
+})();
+
+const ponte = {
   minimize: () => ipcRenderer.send('window:minimize'),
   close: () => ipcRenderer.send('window:close'),
   switchTab: (viewName) => ipcRenderer.send('tab:switch', viewName),
-});
+};
+
+if (ehOFlow) {
+  /**
+   * A TELA DESCOBRE O QUE ESTE APP SABE FAZER PELA PRESENÇA DA FUNÇÃO, nunca pela versão.
+   *
+   * O Flow é carregado da web: a tela nova chega a todo mundo no deploy, mas o app só
+   * atualiza quando o electron-updater terminar e a pessoa reiniciar. Nessa janela, uma tela
+   * nova conversa com um preload velho. Checar versão exigiria uma tabela de "o que existe
+   * em cada versão" que ninguém mantém; checar a função é sempre verdade.
+   */
+  ponte.app = {
+    versao: () => ipcRenderer.invoke('app:versao'),
+    catalogoDeAbas: () => ipcRenderer.invoke('app:abas'),
+    lerAjustes: () => ipcRenderer.invoke('app:ajustes:ler'),
+    gravarAjuste: (chave, valor) => ipcRenderer.invoke('app:ajustes:gravar', chave, valor),
+    procurarAtualizacao: () => ipcRenderer.invoke('app:atualizacao:procurar'),
+    instalarAtualizacao: () => ipcRenderer.invoke('app:atualizacao:instalar'),
+    limparCache: () => ipcRenderer.invoke('app:manutencao:limpar-cache'),
+    sairDasContas: () => ipcRenderer.invoke('app:manutencao:sair-das-contas'),
+    abrirPastaDeDados: () => ipcRenderer.invoke('app:manutencao:abrir-pasta'),
+    abrirLog: () => ipcRenderer.invoke('app:manutencao:abrir-log'),
+    limparLog: () => ipcRenderer.invoke('app:manutencao:limpar-log'),
+    reiniciar: () => ipcRenderer.invoke('app:reiniciar'),
+  };
+}
+
+contextBridge.exposeInMainWorld('haxys', ponte);
 
 // ── Bridge p/ abrir links externos no navegador do sistema ─────────
 // O frontend (lib/openExternal) chama window.electronAPI.openExternal,

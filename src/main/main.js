@@ -7,25 +7,36 @@ const { app, BrowserWindow, WebContentsView, Menu, ipcMain, session, shell } = r
 const path = require('path');
 const https = require('https');
 const { createTray } = require('./tray');
-const { initAutoUpdater } = require('./updater');
+const { initAutoUpdater, procurarAtualizacao, instalarAtualizacao } = require('./updater');
 const { WidgetManager } = require('./widget');
-const { registerShortcuts, unregisterShortcuts } = require('./shortcuts');
+const { registerShortcuts, unregisterShortcuts, reregisterShortcuts } = require('./shortcuts');
 const {
   getMainBounds,
   setMainBounds,
-  getStartWithWindows,
-  setStartWithWindows,
   getLastWidgetOpen,
   setLastWidgetOpen,
 } = require('./store');
+const {
+  ABAS,
+  ABA_FIXA,
+  ZOOM_MINIMO,
+  ZOOM_MAXIMO,
+  lerAjustes,
+  gravarAjuste,
+  zoomDaAba,
+  gravarZoomDaAba,
+  sincronizarInicioComWindows,
+  ehPedidoDoFlow,
+} = require('./settings');
+const { iniciarLog, caminhoDoLog, limparLog } = require('./log');
 
 // ── Constants ────────────────────────────────────────────────────────
-const HAXYS_URL = 'https://flow2.haxys.com.br/';
-const HUB_URL = 'https://hub.haxys.com.br';
-const CORE_URL = 'https://core.haxys.com.br';
-const GEMINI_URL = 'https://gemini.google.com';
-const GOOGLE_FLOW_URL = 'https://labs.google/fx/pt/tools/flow';
 const SESSION_PARTITION = 'persist:haxysflow';
+
+// As URLs das abas moram no catálogo (settings.js) — aqui só o atalho de leitura, para não
+// existir uma segunda lista que envelhece sozinha.
+const abaPorNome = (nome) => ABAS.find((a) => a.nome === nome);
+const HAXYS_URL = abaPorNome('haxys').url;
 
 // Desktop Chrome User-Agent
 // Dynamically build User-Agent to match the exact Chromium version
@@ -43,15 +54,23 @@ let loginWindow = null;
 let tray = null;
 let widgetManager = null;
 let isQuitting = false;
-const startHidden = process.argv.some(arg => arg.includes('--hidden'));
 let mainBoundsTimeout = null;
 
-let flowView = null;
-let hubView = null;
-let coreView = null;
-let geminiView = null;
-let googleFlowView = null;
-let activeView = 'haxys';
+/**
+ * QUEM ABRIU O APP: o Windows no login, ou uma pessoa clicando no ícone?
+ *
+ * A distinção decide o que fazer com `startMode` — "iniciar minimizado" é sobre o login
+ * automático; quem clica no ícone quer a janela na frente, sempre. `--hidden` é o argumento
+ * das instalações anteriores a este ajuste e continua sendo aceito: o registro do Windows só
+ * é reescrito quando alguém mexer no interruptor de novo.
+ */
+const arranqueAutomatico = process.argv.some(
+  (arg) => arg.includes('--autostart') || arg.includes('--hidden'),
+);
+
+/** nome da aba → WebContentsView. Aba desligada não tem view: é esse o ganho do ajuste. */
+const views = new Map();
+let activeView = ABA_FIXA;
 
 let knownVersionTimestamp = null;
 let updatePollingInterval = null;
@@ -68,6 +87,18 @@ try {
 app.userAgentFallback = DESKTOP_UA;
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
 
+iniciarLog();
+
+/**
+ * ACELERAÇÃO POR HARDWARE — o único ajuste que precisa ser lido AQUI, antes do `whenReady`.
+ * Depois que o app sobe, `disableHardwareAcceleration` não tem efeito nenhum; é por isso que
+ * a tela avisa que este interruptor só vale depois de reiniciar, e oferece o botão.
+ */
+if (lerAjustes().hardwareAcceleration === false) {
+  app.disableHardwareAcceleration();
+  console.log('[HaxysFlow] aceleração por hardware desligada pelo ajuste do usuário');
+}
+
 // ── Single Instance Lock ─────────────────────────────────────────────
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -76,7 +107,8 @@ if (!gotLock) {
   app.on('second-instance', (event, commandLine) => {
     // If the second instance was also launched with --hidden, do not show the window.
     // This happens if there are duplicate startup registry entries.
-    const secondInstanceHidden = commandLine && commandLine.some(arg => arg.includes('--hidden'));
+    const secondInstanceHidden = commandLine &&
+      commandLine.some(arg => arg.includes('--hidden') || arg.includes('--autostart'));
     if (secondInstanceHidden) {
       return;
     }
@@ -115,7 +147,7 @@ app.whenReady().then(() => {
   createMainWindow();
 
   widgetManager = new WidgetManager();
-  tray = createTray(mainWindow, widgetManager);
+  tray = createTray(mainWindow, widgetManager, { abrirAjustes: abrirTelaDeAjustes });
   registerShortcuts(widgetManager);
   initAutoUpdater(mainWindow);
 
@@ -232,51 +264,26 @@ function createMainWindow() {
 
   mainWindow.loadURL('about:blank');
 
-  const viewPrefs = {
-    preload: path.join(__dirname, '../preload/preload.js'),
-    partition: SESSION_PARTITION,
-    contextIsolation: true,
-    nodeIntegration: false,
-    sandbox: false,
-    additionalArguments: ['--in-view'],
-  };
-
-  flowView = new WebContentsView({ webPreferences: viewPrefs });
-  hubView = new WebContentsView({ webPreferences: viewPrefs });
-  coreView = new WebContentsView({ webPreferences: viewPrefs });
-  geminiView = new WebContentsView({ webPreferences: viewPrefs });
-  googleFlowView = new WebContentsView({ webPreferences: viewPrefs });
-
-  mainWindow.contentView.addChildView(flowView);
-  mainWindow.contentView.addChildView(hubView);
-  mainWindow.contentView.addChildView(coreView);
-  mainWindow.contentView.addChildView(geminiView);
-  mainWindow.contentView.addChildView(googleFlowView);
-
-  flowView.webContents.setUserAgent(DESKTOP_UA);
-  hubView.webContents.setUserAgent(DESKTOP_UA);
-  coreView.webContents.setUserAgent(DESKTOP_UA);
-  geminiView.webContents.setUserAgent(DESKTOP_UA);
-  googleFlowView.webContents.setUserAgent(DESKTOP_UA);
-
-  flowView.webContents.loadURL(HAXYS_URL);
-  hubView.webContents.loadURL(HUB_URL);
-  coreView.webContents.loadURL(CORE_URL);
-  geminiView.webContents.loadURL(GEMINI_URL);
-  googleFlowView.webContents.loadURL(GOOGLE_FLOW_URL);
-
-  hubView.setVisible(false);
-  coreView.setVisible(false);
-  geminiView.setVisible(false);
-  googleFlowView.setVisible(false);
-  activeView = 'haxys';
+  // Só as abas LIGADAS viram view. Antes as cinco subiam sempre — cinco renderers do
+  // Chromium carregando cinco sites no arranque, inclusive os que a agência não usa.
+  for (const nome of lerAjustes().visibleTabs) criarView(nome);
 
   updateViewBounds();
   mainWindow.on('resize', updateViewBounds);
 
-  flowView.webContents.once('did-finish-load', () => {
-    if (!startHidden) mainWindow.show();
-  });
+  const viewDoFlow = views.get(ABA_FIXA);
+  if (viewDoFlow) {
+    // A janela nasce com `show: false` e só aparece quando o Flow termina de carregar, para
+    // ninguém ver a tela preta do shell. Só que `did-finish-load` NÃO acontece quando a
+    // carga falha — sem máquina em pé ou sem internet, o app ficaria invisível e a pessoa
+    // clicaria no ícone de novo, esbarrando na trava de instância única. Daí as duas redes:
+    // falhou, mostra; demorou demais, mostra.
+    viewDoFlow.webContents.once('did-finish-load', () => mostrarNoArranque());
+    viewDoFlow.webContents.once('did-fail-load', () => mostrarNoArranque());
+    setTimeout(() => mostrarNoArranque(), 10000);
+  } else {
+    mostrarNoArranque();
+  }
 
   // 'on' e não 'once': se o shell recarregar por qualquer motivo (atalho que
   // escapou, crash do renderer, reload programático), a title bar precisa ser
@@ -299,20 +306,19 @@ function createMainWindow() {
   mainWindow.on('resize', saveBounds);
   mainWindow.on('move', saveBounds);
 
-  // ── Close → Hide to Tray ───────────────────────────────────────
+  // ── Fechar → bandeja ou sair, conforme o ajuste ────────────────
+  // Até aqui o X SEMPRE escondia, e só "Sair" no menu da bandeja encerrava de verdade —
+  // quem não conhecia a bandeja fechava o app e ele continuava rodando.
   mainWindow.on('close', (e) => {
-    if (!isQuitting) {
-      e.preventDefault();
-      mainWindow.hide();
+    if (isQuitting) return;
+    if (lerAjustes().closeAction === 'quit') {
+      isQuitting = true;
+      app.quit();
+      return;
     }
+    e.preventDefault();
+    mainWindow.hide();
   });
-
-  // ── Navigation Guards ──────────────────────────────────────
-  setupViewNavGuard(flowView);
-  setupViewNavGuard(hubView);
-  setupViewNavGuard(coreView);
-  setupViewNavGuard(geminiView);
-  setupViewNavGuard(googleFlowView);
 
   // Expose reload to tray
   app.reloadContentView = () => reloadActiveView(true);
@@ -320,7 +326,7 @@ function createMainWindow() {
   // ── Navigation intercept for Update Button ──────────────
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url === 'appaction://install-update/') {
-      require('electron-updater').autoUpdater.quitAndInstall(true, true);
+      instalarAtualizacao();
       return { action: 'deny' };
     }
     if (url === 'appaction://hard-reload/') {
@@ -330,52 +336,169 @@ function createMainWindow() {
     return { action: 'deny' };
   });
 
-  // ── View CSS ──────────────────────────────────────────────────
-  const viewCSS = `
-    ::-webkit-scrollbar { width: 6px !important; }
-    ::-webkit-scrollbar-track { background: transparent !important; }
-    ::-webkit-scrollbar-thumb {
-      background: rgba(255, 255, 255, 0.15) !important;
-      border-radius: 3px !important;
-    }
-    ::-webkit-scrollbar-thumb:hover {
-      background: rgba(255, 255, 255, 0.25) !important;
-    }
-    * { scroll-behavior: smooth !important; }
-    [data-install-prompt],
-    [aria-label*="install"],
-    [aria-label*="download app"] {
-      display: none !important;
-    }
-  `;
-  const insertViewCSS = (view) => view.webContents.on('did-finish-load', () => view.webContents.insertCSS(viewCSS).catch(() => {}));
-  insertViewCSS(flowView);
-  insertViewCSS(hubView);
-  insertViewCSS(coreView);
-  insertViewCSS(geminiView);
-  insertViewCSS(googleFlowView);
+}
+
+// ── Ciclo de vida das views ──────────────────────────────────────────
+
+const VIEW_PREFS = {
+  preload: path.join(__dirname, '../preload/preload.js'),
+  partition: SESSION_PARTITION,
+  contextIsolation: true,
+  nodeIntegration: false,
+  sandbox: false,
+  additionalArguments: ['--in-view'],
+};
+
+const VIEW_CSS = `
+  ::-webkit-scrollbar { width: 6px !important; }
+  ::-webkit-scrollbar-track { background: transparent !important; }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.15) !important;
+    border-radius: 3px !important;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.25) !important;
+  }
+  * { scroll-behavior: smooth !important; }
+  [data-install-prompt],
+  [aria-label*="install"],
+  [aria-label*="download app"] {
+    display: none !important;
+  }
+`;
+
+function criarView(nome) {
+  if (views.has(nome)) return views.get(nome);
+  const aba = abaPorNome(nome);
+  if (!aba || !mainWindow || mainWindow.isDestroyed()) return null;
+
+  const view = new WebContentsView({ webPreferences: VIEW_PREFS });
+  views.set(nome, view);
+
+  mainWindow.contentView.addChildView(view);
+  view.webContents.setUserAgent(DESKTOP_UA);
+  view.setVisible(nome === activeView);
+  setupViewNavGuard(view);
+
+  view.webContents.on('did-finish-load', () => {
+    view.webContents.insertCSS(VIEW_CSS).catch(() => {});
+    // O zoom é reaplicado a cada carga: no Chromium ele é por ORIGEM, então uma navegação
+    // para fora do domínio devolve a página ao tamanho padrão. Sem isto, o ajuste "solta"
+    // sozinho no meio do uso e parece que não foi salvo.
+    aplicarZoom(nome);
+  });
+
+  view.webContents.loadURL(aba.url);
+  posicionarView(view);
+  return view;
+}
+
+function destruirView(nome) {
+  const view = views.get(nome);
+  if (!view) return;
+
+  // Sair de cena ANTES de destruir: desligar a aba aberta não pode deixar a janela vazia.
+  if (activeView === nome) {
+    activeView = ABA_FIXA;
+    const fixa = views.get(ABA_FIXA);
+    if (fixa) fixa.setVisible(true);
+  }
+
+  views.delete(nome);
+  try {
+    mainWindow.contentView.removeChildView(view);
+  } catch {}
+  try {
+    view.webContents.close();
+  } catch {}
+}
+
+function aplicarAbasVisiveis(visiveis) {
+  for (const nome of [...views.keys()]) {
+    if (!visiveis.includes(nome)) destruirView(nome);
+  }
+  for (const nome of visiveis) {
+    if (!views.has(nome)) criarView(nome);
+  }
+  updateViewBounds();
+  injectTabBar();
+}
+
+function posicionarView(view) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const { width, height } = mainWindow.getContentBounds();
+  view.setBounds({ x: 0, y: 38, width, height: height - 38 });
 }
 
 function updateViewBounds() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  const { width, height } = mainWindow.getContentBounds();
-  const viewBounds = { x: 0, y: 38, width, height: height - 38 };
-  if (flowView) flowView.setBounds(viewBounds);
-  if (hubView) hubView.setBounds(viewBounds);
-  if (coreView) coreView.setBounds(viewBounds);
-  if (geminiView) geminiView.setBounds(viewBounds);
-  if (googleFlowView) googleFlowView.setBounds(viewBounds);
+  for (const view of views.values()) posicionarView(view);
 }
 
 function switchToView(name) {
   if (name === activeView) return;
+  // Aba desligada não é destino: ignorar é melhor que esconder todas e mostrar janela vazia.
+  if (!views.has(name)) return;
   activeView = name;
-  if (flowView) flowView.setVisible(name === 'haxys');
-  if (hubView) hubView.setVisible(name === 'haxyshub');
-  if (coreView) coreView.setVisible(name === 'haxyscore');
-  if (geminiView) geminiView.setVisible(name === 'gemini');
-  if (googleFlowView) googleFlowView.setVisible(name === 'googleflow');
+  for (const [nome, view] of views) view.setVisible(nome === name);
   injectTabBar();
+}
+
+// ── Zoom ─────────────────────────────────────────────────────────────
+
+function aplicarZoom(nome) {
+  const view = views.get(nome);
+  if (!view || view.webContents.isDestroyed()) return;
+  view.webContents.setZoomFactor(zoomDaAba(nome));
+}
+
+/**
+ * Ctrl+= / Ctrl+− / Ctrl+0 na aba ativa. Existe porque aqui não há barra de navegador: sem
+ * isto o único caminho para mudar o tamanho seria a tela de ajustes, e ninguém procura uma
+ * tela de configuração para dar um zoom.
+ */
+function ajustarZoomDaAtiva(passo) {
+  const atual = zoomDaAba(activeView);
+  const alvo =
+    passo === 0
+      ? 1
+      : Math.min(ZOOM_MAXIMO, Math.max(ZOOM_MINIMO, Number((atual + passo).toFixed(2))));
+  gravarZoomDaAba(activeView, alvo);
+  aplicarZoom(activeView);
+}
+
+// ── Arranque ─────────────────────────────────────────────────────────
+
+/**
+ * "Maximizada" vale sempre; "minimizada" e "só na bandeja" valem quando foi o WINDOWS que
+ * abriu o app. Quem clica no ícone está pedindo a janela — abrir minimizado nesse caso
+ * parece que o clique não funcionou, e a pessoa clica de novo.
+ */
+let arranqueResolvido = false;
+
+function mostrarNoArranque() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  // Três gatilhos disputam esta função (carregou, falhou, estourou o tempo) e só o primeiro
+  // vale: sem a trava, o tempo limite chegaria depois e DESMINIMIZARIA a janela que o modo
+  // "minimizada" acabou de minimizar.
+  if (arranqueResolvido) return;
+  arranqueResolvido = true;
+
+  const { startMode } = lerAjustes();
+  const modo = arranqueAutomatico ? startMode : startMode === 'maximized' ? 'maximized' : 'window';
+
+  if (modo === 'tray') return;
+  if (modo === 'maximized') {
+    mainWindow.maximize();
+    mainWindow.show();
+    return;
+  }
+  if (modo === 'minimized') {
+    mainWindow.showInactive();
+    mainWindow.minimize();
+    return;
+  }
+  mainWindow.show();
 }
 
 // ── Reload ───────────────────────────────────────────────────────────
@@ -384,14 +507,7 @@ function switchToView(name) {
 // tab bar, então todo pedido de reload é redirecionado para a view ativa.
 
 function getActiveView() {
-  const views = {
-    haxys: flowView,
-    haxyshub: hubView,
-    haxyscore: coreView,
-    gemini: geminiView,
-    googleflow: googleFlowView,
-  };
-  const view = views[activeView];
+  const view = views.get(activeView);
   return view && !view.webContents.isDestroyed() ? view : null;
 }
 
@@ -441,6 +557,12 @@ function installAppMenu() {
           // O role padrão abriria o DevTools do shell vazio; aqui vai na view ativa.
           { label: 'Ferramentas do desenvolvedor', accelerator: 'CmdOrCtrl+Shift+I', click: () => toggleActiveViewDevTools() },
           { label: 'Ferramentas do desenvolvedor', accelerator: 'F12', click: () => toggleActiveViewDevTools() },
+          { type: 'separator' },
+          // Zoom da VIEW ativa, não da janela: os roles padrão agiriam no shell vazio.
+          { label: 'Aumentar zoom', accelerator: 'CmdOrCtrl+=', click: () => ajustarZoomDaAtiva(0.1) },
+          { label: 'Aumentar zoom', accelerator: 'CmdOrCtrl+Plus', click: () => ajustarZoomDaAtiva(0.1) },
+          { label: 'Diminuir zoom', accelerator: 'CmdOrCtrl+-', click: () => ajustarZoomDaAtiva(-0.1) },
+          { label: 'Tamanho normal', accelerator: 'CmdOrCtrl+0', click: () => ajustarZoomDaAtiva(0) },
           { type: 'separator' },
           { role: 'togglefullscreen', label: 'Tela cheia' },
         ],
@@ -524,12 +646,20 @@ function injectTabBar() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
 
   const iconSrc = _iconBase64;
+  // Sempre na ordem canônica do catálogo — reativar uma aba não pode jogá-la para o fim da
+  // barra só porque a view dela foi criada por último.
+  const abasVisiveis = ABAS.filter((a) => views.has(a.nome)).map((a) => ({
+    nome: a.nome,
+    titulo: a.titulo,
+  }));
+
   mainWindow.webContents.executeJavaScript(`
     (function() {
       var existing = document.getElementById('haxys-tabs');
       if (existing) existing.remove();
 
       var activeView = '${activeView}';
+      var abas = ${JSON.stringify(abasVisiveis)};
 
       var bar = document.createElement('div');
       bar.id = 'haxys-tabs';
@@ -599,11 +729,9 @@ function injectTabBar() {
         return btn;
       }
 
-      bar.appendChild(makeTab('Haxys Flow', 'haxys', activeView === 'haxys'));
-      bar.appendChild(makeTab('Haxys Hub', 'haxyshub', activeView === 'haxyshub'));
-      bar.appendChild(makeTab('Haxys Core', 'haxyscore', activeView === 'haxyscore'));
-      bar.appendChild(makeTab('Gemini', 'gemini', activeView === 'gemini'));
-      bar.appendChild(makeTab('Google Flow', 'googleflow', activeView === 'googleflow'));
+      abas.forEach(function(aba) {
+        bar.appendChild(makeTab(aba.titulo, aba.nome, activeView === aba.nome));
+      });
 
       var spacer = document.createElement('div');
       spacer.style.flex = '1';
@@ -773,4 +901,138 @@ function setupIPC() {
       }
     } catch (e) {}
   });
+
+  setupAjustesIPC();
+}
+
+// ── IPC dos ajustes ──────────────────────────────────────────────────
+
+/**
+ * Todo handler daqui passa por `ehPedidoDoFlow` ANTES de qualquer efeito. O preload já se
+ * recusa a expor a ponte fora da origem do Flow, mas o preload roda no renderer: a checagem
+ * que vale é esta, do lado onde a página não tem como mentir sobre quem é.
+ */
+function apenasDoFlow(canal, handler) {
+  ipcMain.handle(canal, (event, ...args) => {
+    if (!ehPedidoDoFlow(event)) {
+      console.warn(`[HaxysFlow] ${canal} recusado: pedido veio de fora do Flow`);
+      throw new Error('Origem não autorizada');
+    }
+    return handler(event, ...args);
+  });
+}
+
+/**
+ * Aplica no app o que acabou de ser gravado. Fica separado da gravação porque o mesmo efeito
+ * precisa valer para quem mexe pela BANDEJA — o menu chama estas funções também.
+ */
+function aplicarAjustes(chave, ajustes) {
+  let aviso = null;
+
+  if (chave === 'startWithWindows') {
+    sincronizarInicioComWindows(ajustes);
+  }
+
+  if (chave === 'visibleTabs') {
+    aplicarAbasVisiveis(ajustes.visibleTabs);
+  }
+
+  if (chave === 'zoom') {
+    for (const nome of views.keys()) aplicarZoom(nome);
+  }
+
+  if (chave === 'widgetShortcut') {
+    const ok = reregisterShortcuts();
+    if (!ok) {
+      aviso = ajustes.widgetShortcut
+        ? `Não consegui registrar ${ajustes.widgetShortcut} — outro programa já usa essa combinação.`
+        : null;
+    }
+  }
+
+  if (chave === 'hardwareAcceleration') {
+    aviso = 'Só vale depois de reiniciar o aplicativo.';
+  }
+
+  return aviso;
+}
+
+function setupAjustesIPC() {
+  apenasDoFlow('app:versao', () => ({
+    versao: app.getVersion(),
+    electron: process.versions.electron,
+    chrome: process.versions.chrome,
+  }));
+
+  apenasDoFlow('app:abas', () => ABAS.map((a) => ({ nome: a.nome, titulo: a.titulo, fixa: !!a.fixa })));
+
+  apenasDoFlow('app:ajustes:ler', () => lerAjustes());
+
+  apenasDoFlow('app:ajustes:gravar', (_event, chave, valor) => {
+    const ajustes = gravarAjuste(chave, valor);
+    const aviso = aplicarAjustes(chave, ajustes);
+    if (tray && tray.atualizarMenu) tray.atualizarMenu();
+    return { ajustes, aviso };
+  });
+
+  apenasDoFlow('app:atualizacao:procurar', () => procurarAtualizacao());
+  apenasDoFlow('app:atualizacao:instalar', () => instalarAtualizacao());
+
+  apenasDoFlow('app:manutencao:limpar-cache', async () => {
+    await session.fromPartition(SESSION_PARTITION).clearCache();
+    return { ok: true };
+  });
+
+  /**
+   * A PARTIÇÃO É UMA SÓ para as cinco abas — apagar os cookies desloga de TUDO, inclusive do
+   * próprio Flow onde o botão foi clicado. Por isso o app se relança em seguida: deixar as
+   * views de pé com a sessão apagada mostraria cinco telas de erro e nenhuma explicação.
+   * O aviso de que isso vai acontecer é dado na tela, antes.
+   */
+  apenasDoFlow('app:manutencao:sair-das-contas', async () => {
+    await session.fromPartition(SESSION_PARTITION).clearStorageData({
+      storages: ['cookies', 'localstorage', 'indexdb', 'websql', 'serviceworkers', 'cachestorage'],
+    });
+    reiniciarApp();
+    return { ok: true };
+  });
+
+  apenasDoFlow('app:manutencao:abrir-pasta', async () => {
+    await shell.openPath(app.getPath('userData'));
+    return { ok: true };
+  });
+
+  apenasDoFlow('app:manutencao:abrir-log', async () => {
+    const erro = await shell.openPath(caminhoDoLog());
+    return { ok: !erro, mensagem: erro || null };
+  });
+
+  apenasDoFlow('app:manutencao:limpar-log', () => ({ ok: limparLog() }));
+
+  apenasDoFlow('app:reiniciar', () => {
+    reiniciarApp();
+    return { ok: true };
+  });
+}
+
+function reiniciarApp() {
+  isQuitting = true;
+  app.relaunch();
+  app.quit();
+}
+
+/**
+ * O caminho de ida do menu da bandeja para a tela de ajustes, que mora no Flow. Vai por
+ * `loadURL` mesmo (recarrega a aba): daqui não há como pedir uma navegação de cliente ao
+ * roteador do Next, e o caminho de volta é a própria navegação do app.
+ */
+function abrirTelaDeAjustes() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.show();
+  mainWindow.focus();
+  switchToView(ABA_FIXA);
+  const view = views.get(ABA_FIXA);
+  if (view && !view.webContents.isDestroyed()) {
+    view.webContents.loadURL(new URL('settings/dispositivo', HAXYS_URL).toString());
+  }
 }
