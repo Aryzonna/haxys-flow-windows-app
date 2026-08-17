@@ -226,6 +226,31 @@ if (ehOFlow) {
     abrirLog: () => ipcRenderer.invoke('app:manutencao:abrir-log'),
     limparLog: () => ipcRenderer.invoke('app:manutencao:limpar-log'),
     reiniciar: () => ipcRenderer.invoke('app:reiniciar'),
+
+    /**
+     * Os atalhos do copiloto de voz, registrados no sistema inteiro em nome desta página.
+     *
+     * A página é quem manda as combinações porque é lá que elas são escolhidas — o ajuste
+     * existe também para quem abre o Flow no navegador, onde aplicativo nenhum existe. Aqui é
+     * só o registrador.
+     */
+    registrarAtalhosGlobais: (combinacoes) =>
+      ipcRenderer.invoke('app:copiloto:atalhos', combinacoes),
+
+    /**
+     * O disparo de volta. Devolve a função que cancela a inscrição.
+     *
+     * O ouvinte é embrulhado para o `event` do IPC NÃO chegar à página: ele carrega o `sender`
+     * e outras referências do Electron, e passá-lo adiante entregaria ao conteúdo web um
+     * caminho para dentro do processo principal — que é justamente o que o `contextBridge`
+     * existe para impedir.
+     */
+    aoDispararAtalhoGlobal: (ouvinte) => {
+      if (typeof ouvinte !== 'function') return () => {};
+      const embrulho = (_event, combinacao) => ouvinte(combinacao);
+      ipcRenderer.on('copiloto:atalho', embrulho);
+      return () => ipcRenderer.removeListener('copiloto:atalho', embrulho);
+    },
   };
 }
 

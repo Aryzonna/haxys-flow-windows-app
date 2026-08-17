@@ -9,7 +9,13 @@ const https = require('https');
 const { createTray } = require('./tray');
 const { initAutoUpdater, procurarAtualizacao, instalarAtualizacao } = require('./updater');
 const { WidgetManager } = require('./widget');
-const { registerShortcuts, unregisterShortcuts, reregisterShortcuts } = require('./shortcuts');
+const {
+  registerShortcuts,
+  unregisterShortcuts,
+  reregisterShortcuts,
+  registrarAtalhosDoCopiloto,
+  soltarAtalhosDoCopiloto,
+} = require('./shortcuts');
 const {
   getMainBounds,
   setMainBounds,
@@ -1015,6 +1021,26 @@ function setupAjustesIPC() {
   apenasDoFlow('app:reiniciar', () => {
     reiniciarApp();
     return { ok: true };
+  });
+
+  /**
+   * Os atalhos do COPILOTO, registrados em nome da página que pediu.
+   *
+   * `event.sender` e não a janela principal: é ele que recebe o disparo de volta, e é ele que
+   * morre quando a aba recarrega. A limpeza vai junto — sem ela, recarregar o Flow deixaria a
+   * combinação presa no sistema apontando para uma página que não existe mais, e o próximo
+   * registro da mesma tecla seria recusado até alguém reiniciar o aplicativo.
+   */
+  apenasDoFlow('app:copiloto:atalhos', (event, combinacoes) => {
+    const sender = event.sender;
+    if (!sender.__haxysAtalhosLimpando) {
+      sender.__haxysAtalhosLimpando = true;
+      sender.once('destroyed', () => soltarAtalhosDoCopiloto(sender));
+      sender.on('did-start-navigation', (_e, _url, _isInPlace, isMainFrame) => {
+        if (isMainFrame) soltarAtalhosDoCopiloto(sender);
+      });
+    }
+    return registrarAtalhosDoCopiloto(combinacoes, sender);
   });
 }
 
