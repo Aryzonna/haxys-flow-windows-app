@@ -15,6 +15,7 @@ const {
   reregisterShortcuts,
   registrarAtalhosDoCopiloto,
   soltarAtalhosDoCopiloto,
+  navegacaoDescartaPagina,
 } = require('./shortcuts');
 const {
   getMainBounds,
@@ -1030,14 +1031,18 @@ function setupAjustesIPC() {
    * morre quando a aba recarrega. A limpeza vai junto — sem ela, recarregar o Flow deixaria a
    * combinação presa no sistema apontando para uma página que não existe mais, e o próximo
    * registro da mesma tecla seria recusado até alguém reiniciar o aplicativo.
+   *
+   * QUAL navegação descarta a página é decisão de `navegacaoDescartaPagina`, e não deste
+   * arquivo: trocar de tela dentro do Flow não descarta documento nenhum, e soltar as teclas
+   * ali matava o atalho global no primeiro clique do menu.
    */
   apenasDoFlow('app:copiloto:atalhos', (event, combinacoes) => {
     const sender = event.sender;
     if (!sender.__haxysAtalhosLimpando) {
       sender.__haxysAtalhosLimpando = true;
       sender.once('destroyed', () => soltarAtalhosDoCopiloto(sender));
-      sender.on('did-start-navigation', (_e, _url, _isInPlace, isMainFrame) => {
-        if (isMainFrame) soltarAtalhosDoCopiloto(sender);
+      sender.on('did-start-navigation', (detalhes) => {
+        if (navegacaoDescartaPagina(detalhes)) soltarAtalhosDoCopiloto(sender);
       });
     }
     return registrarAtalhosDoCopiloto(combinacoes, sender);

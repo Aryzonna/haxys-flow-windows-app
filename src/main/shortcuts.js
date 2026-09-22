@@ -124,6 +124,32 @@ function registrarAtalhosDoCopiloto(combinacoes, webContents) {
   return { registrados };
 }
 
+/**
+ * Esta navegação DESCARTA a página que pediu os atalhos?
+ *
+ * A limpeza existe para um caso só: a página sumiu sem soltar as teclas dela. Recarregamento,
+ * ou uma navegação que troca o documento inteiro — aí o registro fica preso no sistema
+ * apontando para um documento que não existe mais, e o próximo pedido da mesma tecla é
+ * recusado até alguém reiniciar o aplicativo.
+ *
+ * MAS `did-start-navigation` também dispara para navegação DENTRO do mesmo documento, e é
+ * assim que o Flow troca de tela: o roteador do Next chama `history.pushState`, sem recarregar
+ * nada. Ali não há página para descartar — o JavaScript continua vivo e o ouvinte do atalho
+ * continua inscrito. Soltar a tecla ali apaga um registro que NINGUÉM vai refazer, porque quem
+ * o pediu mora na barra do topo, que não remonta ao navegar.
+ *
+ * O defeito que isso causava é o pior tipo: o atalho global funcionava ao abrir o app e morria
+ * na primeira troca de tela, sem nada na tela e sem nada no log — dentro da janela ele
+ * continuava respondendo, então parecia intermitência do sistema.
+ *
+ * Lê do objeto `details` (o primeiro argumento) e não dos argumentos soltos que o Electron
+ * ainda manda depois dele: aqueles são o formato antigo, mantido por compatibilidade, e
+ * `isSameDocument` é o nome de hoje.
+ */
+function navegacaoDescartaPagina(detalhes) {
+  return Boolean(detalhes && detalhes.isMainFrame && !detalhes.isSameDocument);
+}
+
 /** Solta tudo que uma página havia pedido — chamado quando ela morre. */
 function soltarAtalhosDoCopiloto(webContents) {
   for (const [combinacao, dono] of [...atalhosDoCopiloto]) {
@@ -145,4 +171,5 @@ module.exports = {
   unregisterShortcuts,
   registrarAtalhosDoCopiloto,
   soltarAtalhosDoCopiloto,
+  navegacaoDescartaPagina,
 };
