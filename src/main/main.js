@@ -15,8 +15,22 @@ const {
   reregisterShortcuts,
   registrarAtalhosDoCopiloto,
   soltarAtalhosDoCopiloto,
+  definirDestinoDoCopiloto,
   navegacaoDescartaPagina,
 } = require('./shortcuts');
+const {
+  servicoDaAba,
+  ehAbaDoFlow,
+  idDeAbaDoFlow,
+  ehEnderecoDoFlow,
+  nomeDaAba,
+  NOME_PADRAO,
+  abreNaFrente,
+  inserirNaOrdem,
+  vizinhaAoFechar,
+  podeFechar,
+  vizinhaNaFila,
+} = require('./abas-do-flow');
 const {
   getMainBounds,
   setMainBounds,
@@ -76,9 +90,21 @@ const arranqueAutomatico = process.argv.some(
   (arg) => arg.includes('--autostart') || arg.includes('--hidden'),
 );
 
-/** nome da aba → WebContentsView. Aba desligada não tem view: é esse o ganho do ajuste. */
+/**
+ * id da aba → WebContentsView. Aba desligada não tem view: é esse o ganho do ajuste.
+ *
+ * O id de um serviço é o nome dele no catálogo. O Flow pode ter VÁRIAS abas (ver
+ * abas-do-flow.js): a primeira é `haxys`, as outras `haxys:2`, `haxys:3`… — e tudo que é do
+ * serviço e não da aba (zoom, ligar/desligar) passa por `servicoDaAba(id)`.
+ */
 const views = new Map();
 let activeView = ABA_FIXA;
+
+/** As abas do Flow na ordem da barra, o nome de cada uma e a última que esteve na tela. */
+let ordemDoFlow = [];
+const nomesDasAbas = new Map();
+let ultimaDoFlow = ABA_FIXA;
+let proximoNumeroDeAba = 2;
 
 let knownVersionTimestamp = null;
 let updatePollingInterval = null;
@@ -376,44 +402,69 @@ const VIEW_CSS = `
   }
 `;
 
-function criarView(nome) {
-  if (views.has(nome)) return views.get(nome);
-  const aba = abaPorNome(nome);
+/**
+ * @param {string} id a aba (ver `views`)
+ * @param {{ url?: string, depoisDe?: string }} [opcoes] só para as abas do Flow: onde a aba
+ *   começa e ao lado de quem ela entra na barra
+ */
+function criarView(id, opcoes = {}) {
+  if (views.has(id)) return views.get(id);
+  const aba = abaPorNome(servicoDaAba(id));
   if (!aba || !mainWindow || mainWindow.isDestroyed()) return null;
 
   const view = new WebContentsView({ webPreferences: VIEW_PREFS });
-  views.set(nome, view);
+  views.set(id, view);
 
   mainWindow.contentView.addChildView(view);
   view.webContents.setUserAgent(DESKTOP_UA);
-  view.setVisible(nome === activeView);
-  setupViewNavGuard(view);
+  view.setVisible(id === activeView);
+  setupViewNavGuard(view, id);
 
   view.webContents.on('did-finish-load', () => {
     view.webContents.insertCSS(VIEW_CSS).catch(() => {});
     // O zoom é reaplicado a cada carga: no Chromium ele é por ORIGEM, então uma navegação
     // para fora do domínio devolve a página ao tamanho padrão. Sem isto, o ajuste "solta"
     // sozinho no meio do uso e parece que não foi salvo.
-    aplicarZoom(nome);
+    aplicarZoom(id);
   });
 
-  view.webContents.loadURL(aba.url);
+  if (ehAbaDoFlow(id)) {
+    ordemDoFlow = inserirNaOrdem(ordemDoFlow, id, opcoes.depoisDe);
+    nomesDasAbas.set(id, NOME_PADRAO);
+    // O nome da aba é a TELA em que ela está. Quem escreve o título é a trilha do Flow, a cada
+    // troca de tela — inclusive as do roteador, que não recarregam a página.
+    view.webContents.on('page-title-updated', (_event, titulo) => {
+      const nome = nomeDaAba(titulo);
+      if (nomesDasAbas.get(id) === nome) return;
+      nomesDasAbas.set(id, nome);
+      injectTabBar();
+    });
+  }
+
+  view.webContents.loadURL(opcoes.url || aba.url);
   posicionarView(view);
   return view;
 }
 
-function destruirView(nome) {
-  const view = views.get(nome);
+function destruirView(id) {
+  const view = views.get(id);
   if (!view) return;
 
   // Sair de cena ANTES de destruir: desligar a aba aberta não pode deixar a janela vazia.
-  if (activeView === nome) {
-    activeView = ABA_FIXA;
-    const fixa = views.get(ABA_FIXA);
-    if (fixa) fixa.setVisible(true);
+  if (activeView === id) {
+    const destino = ehAbaDoFlow(id) ? vizinhaAoFechar(ordemDoFlow, id) : abaDoFlowEmFoco();
+    activeView = destino || ABA_FIXA;
+    if (ehAbaDoFlow(activeView)) ultimaDoFlow = activeView;
+    const seguinte = views.get(activeView);
+    if (seguinte) seguinte.setVisible(true);
   }
 
-  views.delete(nome);
+  views.delete(id);
+  if (ehAbaDoFlow(id)) {
+    ordemDoFlow = ordemDoFlow.filter((outra) => outra !== id);
+    nomesDasAbas.delete(id);
+    if (ultimaDoFlow === id) ultimaDoFlow = ordemDoFlow[0] || ABA_FIXA;
+  }
   try {
     mainWindow.contentView.removeChildView(view);
   } catch {}
@@ -422,15 +473,62 @@ function destruirView(nome) {
   } catch {}
 }
 
+/** Este serviço tem alguma aba aberta? (O Flow pode ter várias, nenhuma delas com o id `haxys`.) */
+function servicoAberto(nome) {
+  return [...views.keys()].some((id) => servicoDaAba(id) === nome);
+}
+
 function aplicarAbasVisiveis(visiveis) {
-  for (const nome of [...views.keys()]) {
-    if (!visiveis.includes(nome)) destruirView(nome);
+  for (const id of [...views.keys()]) {
+    if (!visiveis.includes(servicoDaAba(id))) destruirView(id);
   }
   for (const nome of visiveis) {
-    if (!views.has(nome)) criarView(nome);
+    if (!servicoAberto(nome)) criarView(nome);
   }
   updateViewBounds();
   injectTabBar();
+}
+
+// ── Abas do Flow ─────────────────────────────────────────────────────
+
+/** A aba do Flow que está na tela, ou a última que esteve. É ela que os ajustes e o copiloto usam. */
+function abaDoFlowEmFoco() {
+  if (ehAbaDoFlow(activeView) && views.has(activeView)) return activeView;
+  if (views.has(ultimaDoFlow)) return ultimaDoFlow;
+  return ordemDoFlow[0] || null;
+}
+
+/**
+ * Abre uma aba nova do Flow. Sem `url`, é o botão "+": a raiz, que leva cada pessoa à
+ * primeira tela que ela alcança — o app não sabe de permissão, e não precisa saber.
+ */
+function abrirAbaDoFlow({ url, depoisDe, naFrente = true } = {}) {
+  if (url && !ehEnderecoDoFlow(url)) return null;
+  const id = idDeAbaDoFlow(proximoNumeroDeAba++);
+  const view = criarView(id, { url: url || HAXYS_URL, depoisDe });
+  if (!view) return null;
+  if (naFrente) switchToView(id);
+  else injectTabBar();
+  return id;
+}
+
+function fecharAbaDoFlow(id) {
+  if (!podeFechar(ordemDoFlow, id)) return;
+  destruirView(id);
+  updateViewBounds();
+  injectTabBar();
+}
+
+/** Ctrl+Tab / Ctrl+Shift+Tab — na ordem da barra, serviços inclusive. */
+function irParaAbaVizinha(passo) {
+  const destino = vizinhaNaFila(ordemDaBarra(), activeView, passo);
+  if (destino) switchToView(destino);
+}
+
+/** A ordem em que as abas aparecem: as do Flow, depois os serviços na ordem do catálogo. */
+function ordemDaBarra() {
+  const servicos = ABAS.filter((a) => a.nome !== ABA_FIXA && views.has(a.nome)).map((a) => a.nome);
+  return [...ordemDoFlow, ...servicos];
 }
 
 function posicionarView(view) {
@@ -449,16 +547,21 @@ function switchToView(name) {
   // Aba desligada não é destino: ignorar é melhor que esconder todas e mostrar janela vazia.
   if (!views.has(name)) return;
   activeView = name;
+  if (ehAbaDoFlow(name)) ultimaDoFlow = name;
   for (const [nome, view] of views) view.setVisible(nome === name);
   injectTabBar();
+  // O foco do teclado vai junto: sem isto, Ctrl+W logo depois de trocar agiria na aba anterior.
+  const view = views.get(name);
+  if (view && !view.webContents.isDestroyed()) view.webContents.focus();
 }
 
 // ── Zoom ─────────────────────────────────────────────────────────────
 
-function aplicarZoom(nome) {
-  const view = views.get(nome);
+/** O zoom é do SERVIÇO: todas as abas do Flow têm o mesmo tamanho. */
+function aplicarZoom(id) {
+  const view = views.get(id);
   if (!view || view.webContents.isDestroyed()) return;
-  view.webContents.setZoomFactor(zoomDaAba(nome));
+  view.webContents.setZoomFactor(zoomDaAba(servicoDaAba(id)));
 }
 
 /**
@@ -467,13 +570,14 @@ function aplicarZoom(nome) {
  * tela de configuração para dar um zoom.
  */
 function ajustarZoomDaAtiva(passo) {
-  const atual = zoomDaAba(activeView);
+  const servico = servicoDaAba(activeView);
+  const atual = zoomDaAba(servico);
   const alvo =
     passo === 0
       ? 1
       : Math.min(ZOOM_MAXIMO, Math.max(ZOOM_MINIMO, Number((atual + passo).toFixed(2))));
-  gravarZoomDaAba(activeView, alvo);
-  aplicarZoom(activeView);
+  gravarZoomDaAba(servico, alvo);
+  for (const id of views.keys()) if (servicoDaAba(id) === servico) aplicarZoom(id);
 }
 
 // ── Arranque ─────────────────────────────────────────────────────────
@@ -576,11 +680,47 @@ function installAppMenu() {
           { role: 'togglefullscreen', label: 'Tela cheia' },
         ],
       },
+      {
+        // As mesmas teclas também são pegas em `before-input-event` de cada view, que é onde o
+        // foco quase sempre está; o menu cobre o resto (foco na barra de abas).
+        label: 'Abas',
+        submenu: [
+          { label: 'Nova aba do Flow', accelerator: 'CmdOrCtrl+T', click: () => abrirAbaDoFlow() },
+          { label: 'Fechar aba', accelerator: 'CmdOrCtrl+W', click: () => fecharAbaDoFlow(activeView) },
+          { label: 'Próxima aba', accelerator: 'Ctrl+Tab', click: () => irParaAbaVizinha(1) },
+          { label: 'Aba anterior', accelerator: 'Ctrl+Shift+Tab', click: () => irParaAbaVizinha(-1) },
+        ],
+      },
     ])
   );
 }
 
-function setupViewNavGuard(view) {
+/**
+ * As teclas de aba, de dentro da página. Devolve true quando a tecla era de aba.
+ *
+ * Ctrl+W numa aba que não fecha (a última do Flow, ou um serviço) é engolido mesmo assim:
+ * deixá-lo passar entregaria a tecla à página, e "fechar" que às vezes faz outra coisa é pior
+ * que "fechar" que às vezes não faz nada.
+ */
+function teclaDeAba(input) {
+  if (!input.control || input.alt || input.meta) return false;
+  const tecla = input.key.toLowerCase();
+  if (tecla === 't' && !input.shift) {
+    abrirAbaDoFlow();
+    return true;
+  }
+  if (tecla === 'w' && !input.shift) {
+    fecharAbaDoFlow(activeView);
+    return true;
+  }
+  if (tecla === 'tab') {
+    irParaAbaVizinha(input.shift ? -1 : 1);
+    return true;
+  }
+  return false;
+}
+
+function setupViewNavGuard(view, id) {
   view.webContents.on('will-navigate', (event, url) => {
     if (isLoginURL(url)) {
       event.preventDefault();
@@ -600,9 +740,15 @@ function setupViewNavGuard(view) {
     }
   });
 
-  view.webContents.setWindowOpenHandler(({ url }) => {
+  view.webContents.setWindowOpenHandler(({ url, disposition }) => {
     if (isLoginURL(url)) {
       openLoginPopup(url, view);
+      return { action: 'deny' };
+    }
+    // Link do Flow aberto "em outro lugar" (rodinha, Ctrl+clique, target=_blank) vira ABA do
+    // Flow — nunca janela, e nunca a página de outro site: a cerca é a origem exata.
+    if (ehAbaDoFlow(id) && ehEnderecoDoFlow(url)) {
+      abrirAbaDoFlow({ url, depoisDe: id, naFrente: abreNaFrente(disposition) });
       return { action: 'deny' };
     }
     if (isAllowedURL(url)) {
@@ -615,6 +761,10 @@ function setupViewNavGuard(view) {
 
   view.webContents.on('before-input-event', (event, input) => {
     if (input.type === 'keyDown') {
+      if (teclaDeAba(input)) {
+        event.preventDefault();
+        return;
+      }
       if (input.key === 'F5' || (input.control && input.key.toLowerCase() === 'r')) {
         if (input.shift) {
           view.webContents.reloadIgnoringCache();
@@ -655,24 +805,36 @@ function injectTabBar() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
 
   const iconSrc = _iconBase64;
-  // Sempre na ordem canônica do catálogo — reativar uma aba não pode jogá-la para o fim da
-  // barra só porque a view dela foi criada por último.
-  const abasVisiveis = ABAS.filter((a) => views.has(a.nome)).map((a) => ({
-    nome: a.nome,
-    titulo: a.titulo,
+  // As do Flow na ordem em que foram abertas; os serviços sempre na ordem canônica do
+  // catálogo — reativar uma aba não pode jogá-la para o fim da barra só porque a view dela
+  // foi criada por último.
+  const fechaveis = ordemDoFlow.length > 1;
+  const abas = ordemDaBarra().map((id) => ({
+    id,
+    titulo: ehAbaDoFlow(id) ? nomesDasAbas.get(id) || NOME_PADRAO : abaPorNome(id).titulo,
+    flow: ehAbaDoFlow(id),
+    fechavel: ehAbaDoFlow(id) && fechaveis,
   }));
 
   mainWindow.webContents.executeJavaScript(`
     (function() {
       var existing = document.getElementById('haxys-tabs');
+      // O botão de atualizar é ligado pelo updater DEPOIS de a barra existir. Redesenhar a barra
+      // (e ela é redesenhada a cada troca de tela, porque o nome da aba muda) não pode apagá-lo.
+      var antigoAtualizar = document.getElementById('app-update-btn');
+      var atualizarVisivel = !!antigoAtualizar && antigoAtualizar.style.display === 'block';
       if (existing) existing.remove();
 
-      var activeView = '${activeView}';
-      var abas = ${JSON.stringify(abasVisiveis)};
+      var activeView = ${JSON.stringify(activeView)};
+      var abas = ${JSON.stringify(abas)};
+
+      function estilo(el, regras) {
+        el.style.cssText = regras.join(' !important;') + ' !important';
+      }
 
       var bar = document.createElement('div');
       bar.id = 'haxys-tabs';
-      bar.style.cssText = [
+      estilo(bar, [
         'position: fixed',
         'top: 0',
         'left: 0',
@@ -685,11 +847,11 @@ function injectTabBar() {
         'padding: 0 0 0 12px',
         'pointer-events: none',
         'background: transparent'
-      ].join(' !important;') + ' !important';
+      ]);
 
       var icon = document.createElement('img');
       icon.src = '${iconSrc}';
-      icon.style.cssText = [
+      estilo(icon, [
         'width: 20px',
         'height: 20px',
         'object-fit: contain',
@@ -697,60 +859,192 @@ function injectTabBar() {
         'flex-shrink: 0',
         'margin-right: 6px',
         'pointer-events: none'
-      ].join(' !important;') + ' !important';
+      ]);
       bar.appendChild(icon);
 
-      function makeTab(label, viewName, active) {
-        var btn = document.createElement('button');
-        btn.textContent = label;
-        btn.style.cssText = [
-          'border: none',
-          'outline: none',
+      // As abas do Flow encolhem quando são muitas, em vez de empurrar os botões da direita
+      // para fora da janela.
+      var faixa = document.createElement('div');
+      estilo(faixa, [
+        'display: flex',
+        'align-items: center',
+        'gap: 2px',
+        'min-width: 0',
+        'flex: 0 1 auto',
+        'overflow: hidden',
+        'pointer-events: none'
+      ]);
+      bar.appendChild(faixa);
+
+      function makeTab(aba, active) {
+        var btn = document.createElement('div');
+        btn.title = aba.titulo;
+        estilo(btn, [
+          'display: flex',
+          'align-items: center',
+          'gap: 4px',
           'background: ' + (active ? 'rgba(255,255,255,0.1)' : 'transparent'),
           'color: rgba(232,234,237,' + (active ? '1' : '0.55') + ')',
           'font-family: "Segoe UI", system-ui, sans-serif',
           'font-size: 12.5px',
           'font-weight: ' + (active ? '600' : '400'),
-          'padding: 5px 14px',
+          'padding: 5px ' + (aba.fechavel ? '6px' : '14px') + ' 5px 14px',
           'border-radius: 8px',
           'cursor: pointer',
           'height: 28px',
+          'box-sizing: border-box',
           'line-height: 18px',
-          'transition: all 0.15s ease',
+          'transition: background 0.15s ease, color 0.15s ease',
           'pointer-events: auto',
           '-webkit-app-region: no-drag',
-          'letter-spacing: 0.1px'
-        ].join(' !important;') + ' !important';
+          'letter-spacing: 0.1px',
+          'min-width: ' + (aba.flow ? '56px' : 'auto'),
+          'max-width: 200px',
+          'flex: ' + (aba.flow ? '0 1 auto' : '0 0 auto'),
+          'user-select: none'
+        ]);
+
+        var rotulo = document.createElement('span');
+        rotulo.textContent = aba.titulo;
+        estilo(rotulo, [
+          'overflow: hidden',
+          'text-overflow: ellipsis',
+          'white-space: nowrap',
+          'min-width: 0',
+          'flex: 1 1 auto'
+        ]);
+        btn.appendChild(rotulo);
+
+        var fechar = null;
+        if (aba.fechavel) {
+          fechar = document.createElement('span');
+          fechar.title = 'Fechar aba (Ctrl+W)';
+          fechar.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"></path></svg>';
+          estilo(fechar, [
+            'display: flex',
+            'align-items: center',
+            'justify-content: center',
+            'width: 18px',
+            'height: 18px',
+            'flex-shrink: 0',
+            'border-radius: 4px',
+            'opacity: ' + (active ? '0.8' : '0'),
+            'transition: opacity 0.15s ease, background 0.15s ease'
+          ]);
+          fechar.addEventListener('mouseenter', function() {
+            this.style.setProperty('background', 'rgba(255,255,255,0.12)', 'important');
+          });
+          fechar.addEventListener('mouseleave', function() {
+            this.style.setProperty('background', 'transparent', 'important');
+          });
+          fechar.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            window.haxys.closeTab(aba.id);
+          });
+          btn.appendChild(fechar);
+        }
 
         btn.addEventListener('mouseenter', function() {
           if (!active) this.style.setProperty('background', 'rgba(255,255,255,0.06)', 'important');
           if (!active) this.style.setProperty('color', 'rgba(232,234,237,0.8)', 'important');
+          if (fechar) fechar.style.setProperty('opacity', '0.8', 'important');
         });
         btn.addEventListener('mouseleave', function() {
           if (!active) this.style.setProperty('background', 'transparent', 'important');
           if (!active) this.style.setProperty('color', 'rgba(232,234,237,0.55)', 'important');
+          if (fechar && !active) fechar.style.setProperty('opacity', '0', 'important');
         });
         btn.addEventListener('click', function(e) {
           e.preventDefault();
           e.stopPropagation();
-          window.haxys.switchTab(viewName);
+          window.haxys.switchTab(aba.id);
+        });
+        // Rodinha na aba fecha, como em qualquer navegador. O mousedown é engolido para o
+        // Chromium não entrar no modo de rolagem automática.
+        btn.addEventListener('mousedown', function(e) {
+          if (e.button === 1) e.preventDefault();
+        });
+        btn.addEventListener('auxclick', function(e) {
+          if (e.button !== 1 || !aba.fechavel) return;
+          e.preventDefault();
+          window.haxys.closeTab(aba.id);
         });
         return btn;
       }
 
+      function makeNova() {
+        var mais = document.createElement('div');
+        mais.title = 'Nova aba (Ctrl+T)';
+        mais.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>';
+        estilo(mais, [
+          'display: flex',
+          'align-items: center',
+          'justify-content: center',
+          'width: 28px',
+          'height: 28px',
+          'flex-shrink: 0',
+          'color: rgba(232,234,237,0.55)',
+          'background: transparent',
+          'border-radius: 8px',
+          'cursor: pointer',
+          'pointer-events: auto',
+          '-webkit-app-region: no-drag',
+          'transition: background 0.15s ease, color 0.15s ease'
+        ]);
+        mais.addEventListener('mouseenter', function() {
+          this.style.setProperty('background', 'rgba(255,255,255,0.06)', 'important');
+          this.style.setProperty('color', 'rgba(232,234,237,0.9)', 'important');
+        });
+        mais.addEventListener('mouseleave', function() {
+          this.style.setProperty('background', 'transparent', 'important');
+          this.style.setProperty('color', 'rgba(232,234,237,0.55)', 'important');
+        });
+        mais.addEventListener('click', function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          window.haxys.newTab();
+        });
+        return mais;
+      }
+
+      function makeDivisor() {
+        var d = document.createElement('div');
+        estilo(d, [
+          'width: 1px',
+          'height: 16px',
+          'flex-shrink: 0',
+          'margin: 0 6px',
+          'background: rgba(255,255,255,0.12)'
+        ]);
+        return d;
+      }
+
+      // O "+" fica colado na última aba do Flow — é do Flow que ele abre — e os serviços vêm
+      // depois de um divisor.
       abas.forEach(function(aba) {
-        bar.appendChild(makeTab(aba.titulo, aba.nome, activeView === aba.nome));
+        if (aba.flow) faixa.appendChild(makeTab(aba, activeView === aba.id));
       });
+      bar.appendChild(makeNova());
+      var servicos = abas.filter(function(a) { return !a.flow; });
+      if (servicos.length) {
+        bar.appendChild(makeDivisor());
+        servicos.forEach(function(aba) {
+          bar.appendChild(makeTab(aba, activeView === aba.id));
+        });
+      }
 
       var spacer = document.createElement('div');
       spacer.style.flex = '1';
+      spacer.style.minWidth = '8px';
       bar.appendChild(spacer);
 
       var updateBtn = document.createElement('div');
       updateBtn.id = 'app-update-btn';
       updateBtn.textContent = 'Atualizar o App';
-      updateBtn.style.cssText = [
-        'display: none',
+      estilo(updateBtn, [
+        'display: ' + (atualizarVisivel ? 'block' : 'none'),
+        'flex-shrink: 0',
         'background: rgba(0, 188, 212, 0.05)',
         'color: #00bcd4',
         'border: 1px solid rgba(0, 188, 212, 0.3)',
@@ -766,7 +1060,7 @@ function injectTabBar() {
         'letter-spacing: 0.5px',
         'transition: all 0.2s ease',
         'margin-right: 8px'
-      ].join(' !important;') + ' !important';
+      ]);
       updateBtn.addEventListener('click', function() {
         window.open('appaction://install-update/');
       });
@@ -776,10 +1070,11 @@ function injectTabBar() {
       refreshBtn.id = 'app-refresh-btn';
       refreshBtn.title = 'Recarregar página (Ctrl+Shift+R)';
       refreshBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"></path><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>';
-      refreshBtn.style.cssText = [
+      estilo(refreshBtn, [
         'display: flex',
         'align-items: center',
         'justify-content: center',
+        'flex-shrink: 0',
         'width: 28px',
         'height: 28px',
         'color: rgba(255, 255, 255, 0.7)',
@@ -790,7 +1085,7 @@ function injectTabBar() {
         '-webkit-app-region: no-drag',
         'transition: background 0.2s, color 0.2s',
         'margin-right: 150px'
-      ].join(' !important;') + ' !important';
+      ]);
 
       refreshBtn.addEventListener('mouseenter', function() {
         this.style.setProperty('background', 'rgba(255, 255, 255, 0.1)', 'important');
@@ -898,8 +1193,30 @@ function setupIPC() {
     if (widgetManager) widgetManager.toggle();
   });
 
-  ipcMain.on('tab:switch', (_event, viewName) => {
-    switchToView(viewName);
+  /*
+    Os pedidos de aba só valem vindos da BARRA (o shell). O preload que os expõe roda também
+    no Gemini e no Google Flow — sem esta cerca, script de terceiro abriria e fecharia abas.
+  */
+  const daBarra = (event) =>
+    !!mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents;
+
+  ipcMain.on('tab:switch', (event, id) => {
+    if (daBarra(event) && typeof id === 'string') switchToView(id);
+  });
+
+  ipcMain.on('tab:new', (event) => {
+    if (daBarra(event)) abrirAbaDoFlow();
+  });
+
+  ipcMain.on('tab:close', (event, id) => {
+    if (daBarra(event) && typeof id === 'string') fecharAbaDoFlow(id);
+  });
+
+  // O atalho global do copiloto vai para a aba do Flow que está na tela (ver shortcuts.js).
+  definirDestinoDoCopiloto((paginas) => {
+    const id = abaDoFlowEmFoco();
+    const view = id && views.get(id);
+    return view ? paginas.find((p) => p === view.webContents) : undefined;
   });
 
   // Abre links externos no navegador do sistema (bridge electronAPI.openExternal)
@@ -1064,8 +1381,10 @@ function abrirTelaDeAjustes() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.show();
   mainWindow.focus();
-  switchToView(ABA_FIXA);
-  const view = views.get(ABA_FIXA);
+  const id = abaDoFlowEmFoco();
+  if (!id) return;
+  switchToView(id);
+  const view = views.get(id);
   if (view && !view.webContents.isDestroyed()) {
     view.webContents.loadURL(new URL('settings/dispositivo', HAXYS_URL).toString());
   }

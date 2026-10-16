@@ -202,6 +202,9 @@ const ponte = {
   minimize: () => ipcRenderer.send('window:minimize'),
   close: () => ipcRenderer.send('window:close'),
   switchTab: (viewName) => ipcRenderer.send('tab:switch', viewName),
+  // A barra de abas desenhada no shell usa estes dois; o main só os aceita vindos de lá.
+  newTab: () => ipcRenderer.send('tab:new'),
+  closeTab: (id) => ipcRenderer.send('tab:close', id),
 };
 
 if (ehOFlow) {

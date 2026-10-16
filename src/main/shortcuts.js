@@ -58,8 +58,46 @@ function reregisterShortcuts() {
 
 // ── Atalhos do COPILOTO, pedidos pela página ─────────────────────────────────
 
-/** Combinação → o `webContents` que a pediu. Uma tecla, um dono. */
+/**
+ * Combinação → as páginas que a pediram. A TECLA é registrada uma vez só no sistema.
+ *
+ * ERA UMA TECLA, UM DONO — e isso quebrou com as abas do Flow. Cada aba é uma página inteira,
+ * com a sua barra do topo, e cada uma pede as mesmas combinações. Com um dono só, a segunda
+ * aba ouvia "não" e mostrava o aviso de que OUTRO PROGRAMA usava a tecla, que era mentira — e
+ * ainda gravava a recusa nos ajustes. Agora as páginas do app compartilham a tecla, e quem
+ * recebe o disparo é escolhido na hora (`definirDestinoDoCopiloto`).
+ */
 const atalhosDoCopiloto = new Map();
+
+/** Entre as páginas que pediram a tecla, qual recebe o disparo. O main.js troca isto. */
+let escolherDestino = (paginas) => paginas[paginas.length - 1];
+
+/**
+ * O main.js diz quem recebe: a aba do Flow que está na tela. Sem isso o disparo cairia numa
+ * aba escondida, e a pessoa ligaria o copiloto numa tela que nem está vendo.
+ */
+function definirDestinoDoCopiloto(escolher) {
+  if (typeof escolher === 'function') escolherDestino = escolher;
+}
+
+function soltarPedidosDe(webContents) {
+  for (const [combinacao, paginas] of [...atalhosDoCopiloto]) {
+    if (!paginas.delete(webContents) || paginas.size) continue;
+    globalShortcut.unregister(combinacao);
+    atalhosDoCopiloto.delete(combinacao);
+  }
+}
+
+function disparar(combinacao) {
+  const paginas = atalhosDoCopiloto.get(combinacao);
+  if (!paginas) return;
+  // A página pode ter sido descarregada (recarregamento, aba fechada) sem passar pelo caminho
+  // de limpeza. Mandar para um `webContents` morto lança.
+  const vivas = [...paginas].filter((p) => !p.isDestroyed());
+  if (!vivas.length) return;
+  const destino = escolherDestino(vivas);
+  (vivas.includes(destino) ? destino : vivas[vivas.length - 1]).send('copiloto:atalho', combinacao);
+}
 
 /**
  * Registra, em nome da PÁGINA, as combinações que acionam o copiloto de voz.
@@ -71,52 +109,39 @@ const atalhosDoCopiloto = new Map();
  * aplicativo nenhum existe). Guardar uma cópia aqui criaria duas verdades sobre a mesma tecla,
  * e a divergência apareceria como "funciona com a janela aberta, não funciona minimizado".
  *
- * SUBSTITUI o conjunto anterior a cada chamada: é o que faz trocar a combinação na tela soltar
- * a antiga, em vez de acumular teclas presas até alguém reiniciar o aplicativo.
+ * SUBSTITUI o conjunto anterior desta página a cada chamada: é o que faz trocar a combinação
+ * na tela soltar a antiga, em vez de acumular teclas presas até alguém reiniciar o aplicativo.
+ * A tecla só sai do sistema quando a ÚLTIMA página que a pedia desiste dela.
  *
  * @param {string[]} combinacoes
- * @param {Electron.WebContents} webContents quem recebe o disparo de volta
+ * @param {Electron.WebContents} webContents quem pode receber o disparo de volta
  * @returns {{registrados: Record<string, boolean>}}
  */
 function registrarAtalhosDoCopiloto(combinacoes, webContents) {
-  // Solta o que esta mesma página tinha pedido antes. Só o dela: outra aba do app pode ter as
-  // suas, e derrubar tudo faria a última tela aberta desligar o atalho das outras.
-  for (const [combinacao, dono] of [...atalhosDoCopiloto]) {
-    if (dono !== webContents) continue;
-    globalShortcut.unregister(combinacao);
-    atalhosDoCopiloto.delete(combinacao);
-  }
+  soltarPedidosDe(webContents);
 
   const registrados = {};
   for (const combinacao of Array.isArray(combinacoes) ? combinacoes : []) {
     if (typeof combinacao !== 'string' || !combinacao) continue;
 
-    /*
-      JÁ REGISTRADA POR OUTRA PÁGINA é `false`, e não uma segunda tentativa: o Electron
-      devolveria false de qualquer jeito, e insistir só deixaria o log confuso. Do lado da
-      tela, "outro programa usa" e "outra aba do app usa" chegam como a mesma resposta —
-      que é a verdade útil: a tecla não é sua.
-    */
-    if (atalhosDoCopiloto.has(combinacao)) {
-      registrados[combinacao] = false;
+    // Outra página do app já segurou a tecla no sistema: esta entra na fila, e a resposta é
+    // sim — a tecla É do app. "Não" fica para quando outro PROGRAMA a segura.
+    const jaNoSistema = atalhosDoCopiloto.get(combinacao);
+    if (jaNoSistema) {
+      jaNoSistema.add(webContents);
+      registrados[combinacao] = true;
       continue;
     }
 
     let ok = false;
     try {
-      ok = globalShortcut.register(combinacao, () => {
-        const dono = atalhosDoCopiloto.get(combinacao);
-        // A página pode ter sido descarregada (recarregamento, aba fechada) sem passar pelo
-        // caminho de limpeza. Mandar para um `webContents` morto lança.
-        if (!dono || dono.isDestroyed()) return;
-        dono.send('copiloto:atalho', combinacao);
-      });
+      ok = globalShortcut.register(combinacao, () => disparar(combinacao));
     } catch (e) {
       console.warn(`[HaxysFlow] atalho do copiloto inválido (${combinacao}):`, e.message);
       ok = false;
     }
 
-    if (ok) atalhosDoCopiloto.set(combinacao, webContents);
+    if (ok) atalhosDoCopiloto.set(combinacao, new Set([webContents]));
     else console.warn(`[HaxysFlow] atalho do copiloto ${combinacao} recusado — já está em uso`);
     registrados[combinacao] = ok;
   }
@@ -152,11 +177,7 @@ function navegacaoDescartaPagina(detalhes) {
 
 /** Solta tudo que uma página havia pedido — chamado quando ela morre. */
 function soltarAtalhosDoCopiloto(webContents) {
-  for (const [combinacao, dono] of [...atalhosDoCopiloto]) {
-    if (dono !== webContents) continue;
-    globalShortcut.unregister(combinacao);
-    atalhosDoCopiloto.delete(combinacao);
-  }
+  soltarPedidosDe(webContents);
 }
 
 function unregisterShortcuts() {
@@ -171,5 +192,6 @@ module.exports = {
   unregisterShortcuts,
   registrarAtalhosDoCopiloto,
   soltarAtalhosDoCopiloto,
+  definirDestinoDoCopiloto,
   navegacaoDescartaPagina,
 };

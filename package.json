@@ -7,7 +7,7 @@
   "scripts": {
     "start": "electron-forge start",
     "start:interna": "set HAXYS_EDICAO=interna&& electron-forge start",
-    "test": "node test-settings.js && node test-shortcuts.js",
+    "test": "node test-settings.js && node test-shortcuts.js && node test-abas.js",
     "package": "electron-forge package",
     "make": "electron-forge make",
     "dist:publica": "electron-builder --win --config.extraMetadata.haxysEdicao=publica --config.directories.output=dist/publica",

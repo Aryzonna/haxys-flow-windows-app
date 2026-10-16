@@ -58,25 +58,50 @@ ok('ir para outro endereço descarta', s.navegacaoDescartaPagina(navegacao(true,
 ok('navegação de iframe não descarta', s.navegacaoDescartaPagina(navegacao(false, false)) === false);
 ok('sem detalhes não descarta', s.navegacaoDescartaPagina(undefined) === false);
 
-console.log('\n— uma tecla, um dono —');
-const paginaA = { isDestroyed: () => false };
-const paginaB = { isDestroyed: () => false };
+/*
+  A TECLA É DO APP, NÃO DE UMA PÁGINA. Com as abas do Flow, cada aba pede as mesmas
+  combinações; quando a regra era "uma tecla, um dono", a segunda aba ouvia não e mostrava o
+  aviso de que OUTRO PROGRAMA usava a tecla — mentira, e ainda gravada nos ajustes.
+*/
+console.log('\n— a tecla é do app; as abas do Flow a compartilham —');
+const recebidos = [];
+const pagina = (nome) => ({
+  isDestroyed: () => false,
+  send: (_canal, combinacao) => recebidos.push(`${nome}:${combinacao}`),
+});
+const paginaA = pagina('A');
+const paginaB = pagina('B');
 
 let r = s.registrarAtalhosDoCopiloto(['Alt+X'], paginaA);
-ok('a primeira página fica com a tecla', r.registrados['Alt+X'] === true);
+ok('a primeira página registra a tecla no sistema', r.registrados['Alt+X'] === true && registrados.has('Alt+X'));
 
 r = s.registrarAtalhosDoCopiloto(['Alt+X'], paginaB);
-ok('a segunda ouve não', r.registrados['Alt+X'] === false);
+ok('a segunda aba ouve sim — não é outro programa', r.registrados['Alt+X'] === true);
+
+s.definirDestinoDoCopiloto((paginas) => paginas.find((p) => p === paginaA));
+registrados.get('Alt+X')();
+ok('o disparo vai para quem o app escolheu (a aba na tela)', recebidos.pop() === 'A:Alt+X');
+
+s.definirDestinoDoCopiloto(() => undefined);
+registrados.get('Alt+X')();
+ok('sem escolha válida, vai para a última que pediu', recebidos.pop() === 'B:Alt+X');
+
+s.soltarAtalhosDoCopiloto(paginaB);
+ok('uma aba sair não tira a tecla das outras', registrados.has('Alt+X') === true);
 
 r = s.registrarAtalhosDoCopiloto(['Alt+C'], paginaA);
 ok('trocar a combinação registra a nova', r.registrados['Alt+C'] === true);
-ok('e solta a antiga', registrados.has('Alt+X') === false);
+ok('e solta a antiga quando ninguém mais a quer', registrados.has('Alt+X') === false);
 
-r = s.registrarAtalhosDoCopiloto(['Alt+X'], paginaB);
-ok('aí a outra página consegue a antiga', r.registrados['Alt+X'] === true);
-
+registrados.set('Alt+Q', () => {}); // outro programa segurando a tecla
+r = s.registrarAtalhosDoCopiloto(['Alt+C', 'Alt+Q'], paginaB);
+ok(
+  'outro programa com a tecla continua sendo não',
+  r.registrados['Alt+Q'] === false && r.registrados['Alt+C'] === true,
+);
+registrados.delete('Alt+Q');
 s.soltarAtalhosDoCopiloto(paginaB);
-ok('soltar leva só as da página que morreu', registrados.has('Alt+X') === false && registrados.has('Alt+C') === true);
+ok('soltar leva só as da página que morreu', registrados.has('Alt+C') === true);
 
 console.log('\n— o pedido vazio —');
 r = s.registrarAtalhosDoCopiloto([], paginaA);
