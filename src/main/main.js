@@ -51,6 +51,7 @@ const {
 } = require('./settings');
 const { iniciarLog, caminhoDoLog, limparLog } = require('./log');
 const { EDICAO } = require('./edicao');
+const { criarJarvisEscondido } = require('./jarvis-escondido');
 
 // ── Constants ────────────────────────────────────────────────────────
 const SESSION_PARTITION = 'persist:haxysflow';
@@ -77,6 +78,8 @@ let tray = null;
 let widgetManager = null;
 let isQuitting = false;
 let mainBoundsTimeout = null;
+/** A escuta do Jarvis numa janela escondida (ver jarvis-escondido.js). */
+let jarvisEscondido = null;
 
 /**
  * QUEM ABRIU O APP: o Windows no login, ou uma pessoa clicando no ícone?
@@ -161,6 +164,7 @@ if (!gotLock) {
 app.on('before-quit', () => {
   isQuitting = true;
   app.isQuitting = true;
+  if (jarvisEscondido) jarvisEscondido.encerrar();
   if (widgetManager) {
     setLastWidgetOpen(widgetManager.isOpen());
   }
@@ -191,6 +195,13 @@ app.whenReady().then(() => {
   }
 
   setupIPC();
+
+  jarvisEscondido = criarJarvisEscondido({
+    origem: HAXYS_URL,
+    webPreferences: VIEW_PREFS,
+    userAgent: DESKTOP_UA,
+  });
+  jarvisEscondido.iniciar();
 });
 
 // ── Session Configuration ────────────────────────────────────────────
@@ -426,6 +437,8 @@ function criarView(id, opcoes = {}) {
     // para fora do domínio devolve a página ao tamanho padrão. Sem isto, o ajuste "solta"
     // sozinho no meio do uso e parece que não foi salvo.
     aplicarZoom(id);
+    // Uma aba do Flow carregou (talvez logo depois do login): se a escuta escondida estava fora, tenta já.
+    if (ehAbaDoFlow(id) && jarvisEscondido) jarvisEscondido.recarregar();
   });
 
   if (ehAbaDoFlow(id)) {
@@ -1340,6 +1353,9 @@ function setupAjustesIPC() {
     reiniciarApp();
     return { ok: true };
   });
+
+  // As abas do Flow perguntam se a escuta do Jarvis está na janela escondida (então não pegam o microfone).
+  apenasDoFlow('app:jarvis:escondido', () => !!jarvisEscondido && jarvisEscondido.viva());
 
   /**
    * Os atalhos do COPILOTO, registrados em nome da página que pediu.

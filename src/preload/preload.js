@@ -229,6 +229,8 @@ if (ehOFlow) {
     abrirLog: () => ipcRenderer.invoke('app:manutencao:abrir-log'),
     limparLog: () => ipcRenderer.invoke('app:manutencao:limpar-log'),
     reiniciar: () => ipcRenderer.invoke('app:reiniciar'),
+    /** A escuta do Jarvis está viva na janela escondida do app? Com `true`, a aba não pega o microfone. */
+    jarvisEscondido: () => ipcRenderer.invoke('app:jarvis:escondido'),
 
     /**
      * Os atalhos do copiloto de voz, registrados no sistema inteiro em nome desta página.
