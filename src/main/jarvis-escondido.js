@@ -87,6 +87,15 @@ function criarJarvisEscondido({ origem, webPreferences, userAgent, log = console
       agendar(`processo caiu: ${detalhes && detalhes.reason}`);
       if (janela && !janela.isDestroyed()) janela.destroy();
     });
+    // O que a escuta avisa (microfone que caiu, transcrição que falhou) vai para o registro do app:
+    // ninguém vê o console de uma janela escondida. Só aviso e erro, para o registro não inchar.
+    // Electron 35 passa o nível no evento (`'warning'`/`'error'`); os antigos, como número (2/3).
+    wc.on('console-message', (e, nivelAntigo, mensagemAntiga) => {
+      const nivel = typeof e?.level === 'string' ? e.level : ['', '', 'warning', 'error'][nivelAntigo] || '';
+      if (nivel !== 'warning' && nivel !== 'error') return;
+      const mensagem = typeof e?.message === 'string' ? e.message : mensagemAntiga;
+      log(`[Jarvis] ${nivel === 'warning' ? 'aviso' : 'erro'}: ${String(mensagem).slice(0, 500)}`);
+    });
     // Nada de abrir janela nova a partir daqui.
     wc.setWindowOpenHandler(() => ({ action: 'deny' }));
     janela.on('closed', () => {
